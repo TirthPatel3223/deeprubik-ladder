@@ -18,27 +18,30 @@ from core.torch_engine import TorchGatherPuzzle  # noqa: E402
 from puzzles.maltese_gear.puzzle import build_maltese_gear_puzzle  # noqa: E402
 
 
-def bench(batch: int, reps: int) -> float:
+def bench(batch: int, reps: int, trials: int = 5) -> tuple[float, float, float]:
+    """Return (median, min, max) state-move applications/s over several trials."""
     puzzle = build_maltese_gear_puzzle()
     gpu = TorchGatherPuzzle(puzzle, device="cuda")
     states = torch.as_tensor(random_walk_states(puzzle, batch, 20, np.random.default_rng(0)), device="cuda")
     for m in range(puzzle.num_moves):  # warm-up
         gpu.apply(states, m)
     torch.cuda.synchronize()
-    t0 = time.perf_counter()
-    for _ in range(reps):
-        for m in range(puzzle.num_moves):
-            gpu.apply(states, m)
-    torch.cuda.synchronize()
-    elapsed = time.perf_counter() - t0
-    return batch * puzzle.num_moves * reps / elapsed
+    rates = []
+    for _ in range(trials):
+        t0 = time.perf_counter()
+        for _ in range(reps):
+            for m in range(puzzle.num_moves):
+                gpu.apply(states, m)
+        torch.cuda.synchronize()
+        rates.append(batch * puzzle.num_moves * reps / (time.perf_counter() - t0))
+    return float(np.median(rates)), min(rates), max(rates)
 
 
 def main() -> None:
     print(f"device: {torch.cuda.get_device_name(0)}")
     for batch in (2**16, 2**18, 2**20):
-        rate = bench(batch, reps=20)
-        print(f"batch {batch:>8}: {rate:,.0f} state-move applications / s")
+        med, lo, hi = bench(batch, reps=20)
+        print(f"batch {batch:>8}: median {med:,.0f}  (range {lo:,.0f} to {hi:,.0f}) state-move applications / s")
 
 
 if __name__ == "__main__":

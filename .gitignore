@@ -9,6 +9,10 @@ __pycache__/
 checkpoints/
 runs/
 data/generated/
+data/ball/
+data/ladders/
+archive/checkpoints/
+archive/data/
 *.pt
 *.npz
 *.log

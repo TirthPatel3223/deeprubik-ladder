@@ -1,0 +1,28 @@
+layer  1:             6 states in     0.5 s
+layer  2:            30 states in     0.0 s
+layer  3:           150 states in     0.0 s
+layer  4:           747 states in     0.0 s
+layer  5:         3,720 states in     0.0 s
+layer  6:        18,528 states in     0.0 s
+layer  7:        92,280 states in     0.0 s
+layer  8:       459,471 states in     0.2 s
+layer  9:     2,288,148 states in     2.1 s
+layer 10:    11,394,354 states in    11.6 s
+layer 11:    56,741,712 states in    63.9 s
+layer 12:   282,559,986 states in   439.3 s
+total build time 519.4 s
+ball of depth 12: 353,559,133 states
+  depth  0:              1
+  depth  1:              6
+  depth  2:             30
+  depth  3:            150
+  depth  4:            747
+  depth  5:          3,720
+  depth  6:         18,528
+  depth  7:         92,280
+  depth  8:        459,471
+  depth  9:      2,288,148
+  depth 10:     11,394,354
+  depth 11:     56,741,712
+  depth 12:    282,559,986
+exit=0

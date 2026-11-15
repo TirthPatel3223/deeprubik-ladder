@@ -9,23 +9,25 @@ from core.gather_engine import random_walk_states
 from core.torch_engine import TorchGatherPuzzle
 from puzzles.maltese_gear.puzzle import build_maltese_gear_puzzle
 
-pytestmark = pytest.mark.skipif(not torch.cuda.is_available(), reason="needs CUDA")
+DEVICES = ["cpu"] + (["cuda"] if torch.cuda.is_available() else [])
 
 
-def test_gpu_matches_numpy_for_every_move() -> None:
+@pytest.mark.parametrize("device", DEVICES)
+def test_torch_matches_numpy_for_every_move(device: str) -> None:
     puzzle = build_maltese_gear_puzzle()
-    gpu = TorchGatherPuzzle(puzzle, device="cuda")
+    gpu = TorchGatherPuzzle(puzzle, device=device)
     states = random_walk_states(puzzle, 2000, 30, np.random.default_rng(1))
-    states_t = torch.as_tensor(states, device="cuda")
+    states_t = torch.as_tensor(states, device=device)
     for m in range(puzzle.num_moves):
         expected = puzzle.apply(states, m)
         got = gpu.apply(states_t, m).cpu().numpy()
         assert np.array_equal(got, expected), f"move {puzzle.move_names[m]} differs on GPU"
 
 
-def test_gpu_inverse_and_order_eight() -> None:
+@pytest.mark.parametrize("device", DEVICES)
+def test_torch_inverse_and_order_eight(device: str) -> None:
     puzzle = build_maltese_gear_puzzle()
-    gpu = TorchGatherPuzzle(puzzle, device="cuda")
+    gpu = TorchGatherPuzzle(puzzle, device=device)
     start = gpu.goal_batch(64)
     for m in range(puzzle.num_moves):
         cur = start

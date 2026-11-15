@@ -29,6 +29,11 @@ ROTATION_MODULUS = 4
 PEGGED_CORNER_STICKERS = (3, 63, 80)
 
 
+def cardinality() -> np.ndarray:
+    """Number of values each state coordinate can take (for one-hot encoding)."""
+    return np.array([6] * md.N_FACE + [6] * md.N_GEAR + [4] * md.N_GEAR, dtype=np.int64)
+
+
 def build_maltese_gear_puzzle() -> GatherPuzzle:
     idx, adds = md.build_tables()
     modulus = np.array(

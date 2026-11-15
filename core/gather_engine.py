@@ -105,3 +105,29 @@ def random_walk_states(puzzle: GatherPuzzle, n: int, depth: int, rng: np.random.
                 states[sel] = puzzle.apply(states[sel], m)
         last = choice
     return states
+
+
+def restrict(puzzle: GatherPuzzle, coords, moves, name: str | None = None) -> GatherPuzzle:
+    """Sub-puzzle on a subset of coordinates and moves.
+
+    ``coords`` must be closed under the chosen moves (a union of their orbits), and
+    ``moves`` must contain the inverse of each of its members. Useful for small test
+    puzzles and for studying one kind of piece on its own.
+    """
+    coords = np.asarray(sorted(int(c) for c in coords), dtype=np.intp)
+    moves = [int(m) for m in moves]
+    new_index = np.full(puzzle.dim, -1, dtype=np.intp)
+    new_index[coords] = np.arange(len(coords))
+    idx = new_index[puzzle.idx[np.ix_(moves, coords)]]
+    assert (idx >= 0).all(), "the coordinate subset is not closed under the chosen moves"
+    position = {m: k for k, m in enumerate(moves)}
+    inverse = np.array([position[int(puzzle.inverse[m])] for m in moves], dtype=np.intp)
+    return GatherPuzzle(
+        name=name or f"{puzzle.name}[{len(coords)} coords, {len(moves)} moves]",
+        move_names=tuple(puzzle.move_names[m] for m in moves),
+        idx=idx,
+        add=puzzle.add[np.ix_(moves, coords)].copy(),
+        modulus=puzzle.modulus[coords].copy(),
+        goal=puzzle.goal[coords].copy(),
+        inverse=inverse,
+    )
