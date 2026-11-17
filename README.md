@@ -1,4 +1,4 @@
-# Cube Solving Pipeline
+# DeepRubik Ladder
 
 A solver for twisty and permutation puzzles that works from the move tables alone. It
 splits the puzzle into a ladder of subgroups and solves one rung at a time: small rungs
