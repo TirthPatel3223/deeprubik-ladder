@@ -336,9 +336,10 @@ class Ladder:
         return lab, pieces, per_rung
 
     def solve_labels(self, lab: np.ndarray, beam: int | None = None, weight: float = 0.3) -> tuple[Word, list[int]]:
-        """Solve a labelled state. Returns the reduced primitive word and the cost spent per rung."""
+        """Solve a labelled state. Returns the reduced primitive word (turns merged across rungs, and
+        across commuting moves) and the cost spent per rung."""
         _, pieces, per_rung = self.descend(lab, beam=beam, weight=weight)
-        return self.alg.concat(*pieces), per_rung
+        return self.alg.simplify(self.alg.concat(*pieces)), per_rung
 
     def solve(self, state: np.ndarray, beam: int | None = None, weight: float = 0.3) -> tuple[Word, list[int]]:
         """Solve a visible state of the underlying GatherPuzzle."""

@@ -3,8 +3,9 @@ from __future__ import annotations
 
 import numpy as np
 
-from core.discover import generator_periods, linked_orbits, propose_ladder
+from core.discover import forced_all, generator_periods, linked_orbits, propose_ladder
 from core.ladder import Ladder
+from puzzles.tangram.ladder import O_BOTTOM
 from puzzles.toy.two_face_corners import STATE_COUNT
 
 
@@ -33,3 +34,15 @@ def test_proposed_ladder_places_then_twists_and_solves(toy) -> None:
         state = puzzle.apply_word(puzzle.goal, rng.integers(0, 4, size=40).tolist())
         word, _ = ladder.solve(state)
         assert np.array_equal(puzzle.apply_word(state, list(word)), puzzle.goal)
+
+
+def test_proposal_is_completed_by_the_exact_check(tangram_original) -> None:
+    """With short macros the greedy rules leave the original Tangram Cube's bottom turning corner
+    unplaced: once the other rungs are solved no short word reaches it, so it looked solved. The
+    exact check finds it is not and puts it in a first rung; the proposal then solves everything."""
+    _, model, st = tangram_original
+    specs, report = propose_ladder(model, st, radius=3, log=lambda _msg: None)
+    assert O_BOTTOM in report["not_forced"] and specs[0].name == "first"
+    feats = [st.feature(*fs) for spec in specs for fs in spec.features]
+    everything = [st.feature(o.index, "full") for o in st.orbits]
+    assert forced_all(model, feats, everything) == [True] * len(everything)

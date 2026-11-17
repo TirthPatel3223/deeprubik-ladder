@@ -300,8 +300,8 @@ EVAL_PLACEHOLDER
 - **Rung ordering** (`core/discover.py`) is greedy and looks one rung ahead. It reproduces
   this ladder, but its proposal for a new puzzle should be checked by building it.
 - **Other puzzles.** Nothing in `core/` is specific to the Maltese cube. A new puzzle needs
-  its move tables as a `GatherPuzzle` and a rung list. Only the toy puzzle has been run
-  besides the Maltese cube.
+  its move tables as a `GatherPuzzle` and a rung list. The Tangram Cube Extreme is the
+  second: its tables are compiled from its 3D model (`core/geometry.py`), see `docs/tangram.md`.
 
 ---
 

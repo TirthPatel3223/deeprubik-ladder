@@ -42,6 +42,33 @@ class WordAlgebra:
         # A "face" is a move together with its inverse; pick the smaller index as the base.
         self.base = [min(m, self.inverse[m]) for m in range(model.num_moves)]
         self.sign = [1 if m == self.base[m] else -1 for m in range(model.num_moves)]
+        gens = [np.asarray(g) for g in model.gens]
+        # commutes[a][b]: moves a and b commute (the Tangram Cube's two corner layers; no Maltese pair).
+        self.commutes = [[bool(np.array_equal(ga[gb], gb[ga])) for gb in gens] for ga in gens]
+
+    def simplify(self, word: Sequence[int]) -> Word:
+        """``reduce``, and also merge a turn into an earlier turn of its face when every turn between
+        them commutes with it: ``D' U' D`` is ``U'`` because the two corner layers commute. Only group
+        identities are used, so the result is the same element; it is never longer."""
+        runs: list[list[int]] = []                    # [base move, exponent modulo the order]
+        for m in self.reduce(word):
+            b, s = self.base[m], self.sign[m]
+            if self.inverse[b] == b:
+                s = 1
+            j = len(runs) - 1
+            while j >= 0 and runs[j][0] != b and self.commutes[runs[j][0]][b]:
+                j -= 1
+            if j >= 0 and runs[j][0] == b:
+                runs[j][1] = (runs[j][1] + s) % self.order[b]
+                if runs[j][1] == 0:
+                    del runs[j]                       # every later run commutes with b, so none can merge now
+            else:
+                runs.append([b, s % self.order[b]])
+        out: list[int] = []
+        for b, e in runs:
+            k = self.order[b]
+            out.extend([b] * e if e <= k - e else [self.inverse[b]] * (k - e))
+        return self.reduce(out)
 
     def reduce(self, word: Sequence[int]) -> Word:
         """Shortest word obtainable by merging adjacent turns of the same face."""

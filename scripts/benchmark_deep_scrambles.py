@@ -1,4 +1,7 @@
-"""Benchmark the Maltese Gear Cube solver on deep random scrambles (depth 2000 to 5000).
+"""Benchmark a puzzle's ladder solver on deep random scrambles (depth 2000 to 5000).
+
+    python scripts/benchmark_deep_scrambles.py                                     # Maltese Gear Cube
+    python scripts/benchmark_deep_scrambles.py --puzzle tangram_extreme --out runs/tangram_benchmark.json
 
 Generates 100 states with scramble depths uniformly sampled in [min_len, max_len],
 runs the full ladder solver on each, verifies every solution on the reference
@@ -22,8 +25,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from core.ladder import Ladder
 from core.perm_model import build_point_model
 from core.structure import analyse
-from puzzles.maltese_gear.ladder import LADDERS
-from puzzles.maltese_gear.puzzle import build_maltese_gear_puzzle
+from puzzles.registry import PUZZLES, get_puzzle
 
 
 def parse_args():
@@ -33,9 +35,10 @@ def parse_args():
     ap.add_argument("--max-len", type=int, default=5000, help="max scramble depth (default: 5000)")
     ap.add_argument("--beam", type=int, default=4096, help="base beam width (default: 4096)")
     ap.add_argument("--weight", type=float, default=0.3, help="weight on g-cost in beam search f = weight * g + h (default: 0.3)")
-    ap.add_argument("--ladder", choices=sorted(LADDERS), default="learned")
+    ap.add_argument("--puzzle", choices=sorted(PUZZLES), default="maltese")
+    ap.add_argument("--ladder", default=None, help="ladder name (default: the puzzle's)")
     ap.add_argument("--radius", type=int, default=7)
-    ap.add_argument("--cache", default=None, help="ladder cache (default: data/ladders/<ladder>_r<radius>)")
+    ap.add_argument("--cache", default=None, help="ladder cache (default: see scripts/build_ladder.py)")
     ap.add_argument("--seed", type=int, default=42, help="random seed for scrambles (default: 42)")
     ap.add_argument("--out", default="runs/benchmark_100_results.json", help="path to save JSON results")
     return ap.parse_args()
@@ -43,23 +46,30 @@ def parse_args():
 
 def main():
     args = parse_args()
+    entry = get_puzzle(args.puzzle)
+    ladders = entry.ladders()
+    ladder_name = args.ladder or entry.default_ladder
+    if ladder_name not in ladders:
+        sys.exit(f"{entry.title} has the ladders {sorted(ladders)}")
     print("=" * 80)
-    print(f"Maltese Gear Cube Benchmark: {args.n} states, depth {args.min_len}..{args.max_len}, beam {args.beam}")
+    print(f"{entry.title} Benchmark: {args.n} states, depth {args.min_len}..{args.max_len}, beam {args.beam}")
     print("=" * 80)
 
-    puzzle = build_maltese_gear_puzzle()
+    puzzle = entry.build()
     model = build_point_model(puzzle)
     structure = analyse(model)
-    cache = Path(args.cache) if args.cache else Path("data/ladders") / f"{args.ladder}_r{args.radius}"
+    cache = Path(args.cache) if args.cache else entry.cache_dir(ladder_name, args.radius)
 
     print(f"Loading ladder from {cache}...")
-    ladder = Ladder(model, structure, LADDERS[args.ladder], mitm_radius=args.radius, log=lambda _msg: None)
+    ladder = Ladder(model, structure, ladders[ladder_name], mitm_radius=args.radius, log=lambda _msg: None)
     ladder.build(cache_dir=cache)
     if not ladder.ready():
         missing = [r.spec.name for r in ladder.rungs if r.table is None and r.heuristic is None]
         sys.exit(f"Ladder in {cache} is incomplete; untrained rungs: {missing}")
 
-    alg = ladder.alg
+    notation = entry.notation(ladder.alg)
+    metric_names = [m for m, _ in notation.metrics]
+    keys = [m.replace(" ", "_") for m in metric_names]
     names = [r.spec.name for r in ladder.rungs]
     print(f"Ladder ready with {len(names)} rungs: {', '.join(names)}")
 
@@ -101,12 +111,11 @@ def main():
         solved = (word is not None) and verified
         if solved:
             solved_count += 1
-            qt_len = len(word)
-            ft_len = alg.face_turns(word)
+            lengths = notation.lengths(word)
             rung_str = ", ".join(f"{n}:{c}" for n, c in zip(names, per_rung))
-            status_str = f"SOLVED in {dt:5.1f}s | {qt_len:4d} QT ({ft_len:4d} FT) | [{rung_str}]"
+            status_str = f"SOLVED in {dt:5.1f}s | {notation.describe(word)} | [{rung_str}]"
         else:
-            qt_len, ft_len = None, None
+            lengths = {m: None for m in metric_names}
             status_str = f"FAILED in {dt:5.1f}s | reason: {err_msg}"
 
         total_time += dt
@@ -120,8 +129,7 @@ def main():
             "depth": depth,
             "solved": solved,
             "time_s": round(dt, 2),
-            "quarter_turns": qt_len,
-            "face_turns": ft_len,
+            **{k: lengths[m] for k, m in zip(keys, metric_names)},
             "per_rung": per_rung,
             "verified": verified,
             "error": err_msg,
@@ -131,6 +139,7 @@ def main():
         # Periodically flush results to disk
         with open(out_path, "w") as f:
             json.dump({
+                "puzzle": entry.name,
                 "n_total": args.n,
                 "n_completed": idx + 1,
                 "solved_count": solved_count,
@@ -158,17 +167,17 @@ def main():
     print(f"Average Time:    {total_time / args.n:.2f} s per scramble")
 
     if solved_results:
-        qts = np.array([r["quarter_turns"] for r in solved_results])
-        fts = np.array([r["face_turns"] for r in solved_results])
         times = np.array([r["time_s"] for r in solved_results])
-        print(f"\nSolution Length (Quarter Turns): Mean {qts.mean():.1f} ± {qts.std():.1f} (Min {qts.min()}, Max {qts.max()})")
-        print(f"Solution Length (Face Turns):    Mean {fts.mean():.1f} ± {fts.std():.1f} (Min {fts.min()}, Max {fts.max()})")
+        print()
+        for k, m in zip(keys, metric_names):
+            vals = np.array([r[k] for r in solved_results])
+            print(f"Solution Length ({m.title() + '):':15s} Mean {vals.mean():.1f} ± {vals.std():.1f} (Min {vals.min()}, Max {vals.max()})")
         print(f"Solve Time (Solved only):        Mean {times.mean():.1f}s ± {times.std():.1f}s (Min {times.min():.1f}s, Max {times.max():.1f}s)")
 
         per_rung_arr = np.array([r["per_rung"] for r in solved_results])
-        print("\nMean Moves Per Rung:")
+        print(f"\nMean {metric_names[0].title()} Per Rung:")
         for name, mean_c in zip(names, per_rung_arr.mean(axis=0)):
-            print(f"  {name:14s}: {mean_c:6.1f} moves")
+            print(f"  {name:14s}: {mean_c:6.1f} {metric_names[0]}")
 
     print(f"\nFull detailed results saved to: {out_path.resolve()}")
 

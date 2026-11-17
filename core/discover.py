@@ -26,6 +26,16 @@ Rule 4, bits per macro length (orders the features of one kind of piece)
 A rung is given an exact table when its coset count fits the budget and a value network
 otherwise. The result is a list of ``RungSpec`` that ``core.ladder.Ladder`` builds as is.
 
+Completeness check
+    A feature that no allowed short word changes is not necessarily solved: it may only need
+    longer words. (On the Tangram Cube Extreme, with everything else solved, a turning corner can
+    still be turned 120° and two middle edges flipped, but no word of up to 12 moves does it.)
+    So at the end every orbit is tested exactly: does fixing the chosen features force it to its
+    goal? The test is a pointwise stabiliser (sympy), which is exact when each feature's goal
+    value pins its pieces down (all pieces look different, or the only look-alikes are empty
+    places). An orbit that is not forced becomes part of a first rung, solved while the
+    primitive moves are still allowed.
+
 The scores are greedy and look one rung ahead. They reproduce the ladder used for the
 Maltese Gear Cube, but they are a proposal to be checked by building it, not a guarantee.
 """
@@ -87,14 +97,16 @@ def _slot_perms(model: PointModel, orb: Orbit) -> np.ndarray:
 
 def linked_orbits(model: PointModel, structure: Structure) -> list[list[int]]:
     """Groups of orbits whose pieces are permuted identically by every move. They describe
-    the same physical pieces (for instance a counter and the colour that travels with it)."""
+    the same physical pieces (for instance a counter and the colour that travels with it).
+    An orbit with a single piece (a piece that only turns in place) is permuted trivially,
+    which says nothing, so it is never grouped with another."""
     perms = [_slot_perms(model, o) for o in structure.orbits]
     groups: list[list[int]] = []
     for i, orb in enumerate(structure.orbits):
         placed = False
         for group in groups:
             j = group[0]
-            if structure.orbits[j].n_pieces != orb.n_pieces:
+            if structure.orbits[j].n_pieces != orb.n_pieces or orb.n_pieces == 1:
                 continue
             # look for a relabelling of slots that turns one action into the other
             n = orb.n_pieces
@@ -128,6 +140,53 @@ def _fixes(features: Sequence[Feature], tables: np.ndarray) -> np.ndarray:
     for f in features:
         ok &= (f.compute(tables) == f.goal).all(axis=-1)
     return ok
+
+
+def stabiliser_points(feature: Feature) -> list[int] | None:
+    """Points whose pointwise stabiliser is exactly the set of elements that leave ``feature`` at
+    its goal value, or None if no such set exists.
+
+    A slot is pinned when only its own home piece shows the goal class there. Fixing the feature
+    then fixes the pinned slots' points, and the unpinned pieces fill the unpinned slots. This is
+    the whole stabiliser when every unpinned piece shows the goal class in every unpinned slot it
+    can reach: the unpinned pieces are look-alikes of one kind (for example empty places), so any
+    arrangement of them shows the goal. Otherwise (identical pieces of several colours, say) None.
+    """
+    orb = feature.orbit
+    hits = feature.table == feature.goal[:, None]                   # (slots, labels): shows the goal class
+    possible = orb.arrangement[:, :, 0] >= 0
+    pinned = [b for b in range(orb.n_pieces) if int(hits[b].sum()) == 1]
+    loose = [b for b in range(orb.n_pieces) if int(hits[b].sum()) > 1]
+    loose_labels = [int(x) for b in loose for x in orb.pieces[b]]
+    for b in loose:
+        for c in loose_labels:
+            if possible[b, c] and not hits[b, c]:
+                return None
+    return sorted(int(p) for b in pinned for p in orb.pieces[b])
+
+
+def forced_all(model: PointModel, fixed: Sequence[Feature], features: Sequence[Feature]) -> list[bool] | None:
+    """For each of ``features``: does every element that keeps ``fixed`` at their goal values keep it
+    at its goal too? Exact (one pointwise stabiliser in sympy); None when ``stabiliser_points``
+    cannot express one of the fixed features."""
+    from sympy.combinatorics import Permutation, PermutationGroup
+
+    points: list[int] = []
+    for f in fixed:
+        p = stabiliser_points(f)
+        if p is None:
+            return None
+        points.extend(p)
+    group = PermutationGroup([Permutation(np.argsort(g).tolist()) for g in model.gens])   # image form
+    stab = group.pointwise_stabilizer(sorted(set(points))) if points else group
+    labels = [np.argsort(np.asarray(k.array_form)) for k in stab.generators]  # the labelled state each produces
+    return [all((f.compute(lab) == f.goal).all() for lab in labels) for f in features]
+
+
+def forced(model: PointModel, fixed: Sequence[Feature], feature: Feature) -> bool | None:
+    """``forced_all`` for one feature."""
+    out = forced_all(model, fixed, [feature])
+    return None if out is None else out[0]
 
 
 def propose_ladder(model: PointModel, structure: Structure, radius: int = 6, table_budget: int = 10_000_000,
@@ -221,4 +280,25 @@ def propose_ladder(model: PointModel, structure: Structure, radius: int = 6, tab
                 break
         if not pool:
             break
+
+    # -- completeness: an orbit no short word changes may still be unsolved --------------------
+    verdicts = forced_all(model, fixed, everything)
+    if verdicts is None:
+        loose, undecided = [], [o.index for o in structure.orbits]
+    else:
+        loose = [o.index for o, ok in zip(structure.orbits, verdicts) if not ok]
+        undecided = []
+    report["not_forced"], report["undecided"] = loose, undecided
+    if undecided:
+        log(f"orbits {undecided}: identical-looking pieces, so whether the rungs above solve them is not "
+            "decided here; building the ladder and replaying its solutions checks it")
+    if loose:
+        feats = [(o, "full") for o in loose]
+        q = Quotient([structure.feature(*fs) for fs in feats], prim)
+        table = build_table_auto(q, max_states=table_budget) if q.packable else None
+        mode = "table" if table is not None and table.complete else "learned"
+        size = f"{len(table):,} cosets" if table is not None and table.complete else "too many cosets for a table"
+        log(f"orbits {loose} are not forced by the rungs above: no word of up to {2 * radius} moves reaches them "
+            f"once those are solved. They go first, with the primitive moves ({size}, {mode}).")
+        specs.insert(0, RungSpec("first", feats, mode=mode, max_actions=600 if mode == "table" else 128))
     return specs, report

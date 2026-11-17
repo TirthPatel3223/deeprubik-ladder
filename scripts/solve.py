@@ -1,19 +1,27 @@
-"""Solve Maltese Gear Cube scrambles with a built ladder, and verify every solution.
+"""Solve scrambles with a built ladder, and verify every solution.
 
-    python scripts/solve.py --scramble "U L F' U2 L'3 F"        # one scramble, in move notation
-    python scripts/solve.py --random 50 --beam 4096             # statistics over random scrambles
+    python scripts/solve.py --scramble "U L F' U2 L'3 F"                       # Maltese Gear Cube
+    python scripts/solve.py --random 50 --beam 4096
+    python scripts/solve.py --puzzle tangram_extreme --scramble "U2' F R U3 D' L"
+    python scripts/solve.py --puzzle tangram_extreme --random 50 --replay-json runs/tangram_solutions.json
 
-Moves are U, L, F and their inverses U', L', F'. A number after a move repeats it (U2, F'3).
-Every solution is replayed on the reference simulator (the verified move tables) before it
-is reported; a solution that does not reach the solved state is an error, not a result.
+Each puzzle reads and writes its own notation. Maltese Gear Cube: moves U, L, F and their inverses
+U', L', F'; a number after a move repeats it (U2, F'3); lengths in quarter turns and face turns (a single
+or double turn of a face counts one, a triple or quadruple turn two). Tangram Cube: U, D (60° steps;
+U2 = 120°, U3 = 180°, U2' = 120° anticlockwise) and the flips F, R, L, as in its simulator; lengths in
+steps (each 60° step or flip) and turns (a corner-layer turn by any amount, or a flip).
 
-Lengths are reported in quarter turns, and in face turns (a single or double turn of a face
-counts one, a triple or quadruple turn two), the metric used by other solvers of this puzzle.
+Every solution is replayed on the reference simulator (the verified move tables) before it is
+reported; a solution that does not reach the solved state is an error, not a result.
+
+--markdown writes one solution as a page like solutions/maltese_solution.md. --replay-json writes
+every scramble and solution in the Tangram simulator's notation, for tools/export/replay.gen.ts in the
+Cube_Modeling project, which replays them on the 3D model's own engine.
 """
 from __future__ import annotations
 
 import argparse
-import re
+import json
 import sys
 import time
 from pathlib import Path
@@ -25,46 +33,69 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from core.ladder import Ladder  # noqa: E402
 from core.perm_model import build_point_model  # noqa: E402
 from core.structure import analyse  # noqa: E402
-from puzzles.maltese_gear.ladder import LADDERS  # noqa: E402
-from puzzles.maltese_gear.puzzle import build_maltese_gear_puzzle  # noqa: E402
+from puzzles.registry import PUZZLES, get_puzzle  # noqa: E402
 
 
-def parse_word(text: str, move_names: tuple[str, ...]) -> list[int]:
-    """'U L2 F'3' -> move indices. The count follows the move name, after the prime if any."""
-    out: list[int] = []
-    for token in text.split():
-        match = re.fullmatch(r"([A-Za-z]'?)(\d*)", token)
-        if match is None or match.group(1) not in move_names:
-            raise ValueError(f"cannot read move {token!r}; moves are {' '.join(move_names)}")
-        out.extend([move_names.index(match.group(1))] * int(match.group(2) or 1))
-    return out
+def write_markdown(path: Path, title: str, label: str, notation, scramble, word, per_rung, names) -> None:
+    lengths = notation.describe(word)
+    moves = notation.format(word).split()
+    lines = [f"{k // 4 + 1:3d}. " + " ".join(moves[k:k + 4]) for k in range(0, len(moves), 4)]
+    unit = notation.metrics[0][0]
+    text = [
+        f"# {title} solution",
+        "",
+        f"Solved with the ladder solver ({label}), then replayed on the reference simulator: the result is the solved state.",
+        "",
+        f"- Scramble ({notation.describe(scramble)}): `{notation.format(scramble)}`",
+        f"- Solution: {len(moves)} moves as written below ({lengths})",
+        f"- Per rung, in {unit} before merging across rungs: " + ", ".join(f"{n} {c}" for n, c in zip(names, per_rung)),
+        *([f"- Notation: {notation.legend}"] if notation.legend else []),
+        "- Read left to right, top to bottom, 4 moves per line.",
+        "",
+        "```",
+        *lines,
+        "```",
+        "",
+    ]
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("\n".join(text), encoding="utf-8")
 
 
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("--ladder", choices=sorted(LADDERS), default="learned")
+    ap.add_argument("--puzzle", choices=sorted(PUZZLES), default="maltese")
+    ap.add_argument("--ladder", default=None, help="ladder name (default: the puzzle's)")
     ap.add_argument("--radius", type=int, default=7)
-    ap.add_argument("--cache", default=None, help="ladder cache (default: data/ladders/<ladder>_r<radius>)")
-    ap.add_argument("--scramble", default=None, help="a scramble in move notation")
+    ap.add_argument("--cache", default=None, help="ladder cache (default: see scripts/build_ladder.py)")
+    ap.add_argument("--scramble", default=None, help="a scramble in the puzzle's notation")
     ap.add_argument("--random", type=int, default=0, help="solve this many random scrambles and print statistics")
-    ap.add_argument("--scramble-len", type=int, default=200, help="length of each random scramble")
+    ap.add_argument("--scramble-len", type=int, default=None, help="length of each random scramble (default: the puzzle's)")
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--beam", type=int, default=4096, help="beam width on the learned rungs")
+    ap.add_argument("--markdown", default=None, help="write the --scramble solution as a markdown page")
+    ap.add_argument("--replay-json", default=None, help="write scrambles and solutions for the 3D model's replay check")
     args = ap.parse_args()
     if args.scramble is None and not args.random:
         ap.error("give --scramble or --random")
 
-    puzzle = build_maltese_gear_puzzle()
+    entry = get_puzzle(args.puzzle)
+    ladders = entry.ladders()
+    ladder_name = args.ladder or entry.default_ladder
+    if ladder_name not in ladders:
+        ap.error(f"{entry.title} has the ladders {sorted(ladders)}")
+    puzzle = entry.build()
     model = build_point_model(puzzle)
     structure = analyse(model)
-    cache = Path(args.cache) if args.cache else Path("data/ladders") / f"{args.ladder}_r{args.radius}"
-    ladder = Ladder(model, structure, LADDERS[args.ladder], mitm_radius=args.radius, log=lambda _msg: None)
+    cache = Path(args.cache) if args.cache else entry.cache_dir(ladder_name, args.radius)
+    ladder = Ladder(model, structure, ladders[ladder_name], mitm_radius=args.radius, log=lambda _msg: None)
     ladder.build(cache_dir=cache)
     if not ladder.ready():
         missing = [r.spec.name for r in ladder.rungs if r.table is None and r.heuristic is None]
         sys.exit(f"the ladder in {cache} is not complete; untrained rungs: {missing} (see scripts/train_rung.py)")
-    alg = ladder.alg
+    notation = entry.notation(ladder.alg)
+    unit = notation.metrics[0][0]
     names = [r.spec.name for r in ladder.rungs]
+    replays: list[dict] = []
 
     def solve(scramble: list[int]):
         state = puzzle.apply_word(puzzle.goal, scramble)
@@ -73,42 +104,59 @@ def main() -> None:
         seconds = time.time() - t0
         if not np.array_equal(puzzle.apply_word(state, list(word)), puzzle.goal):
             raise AssertionError("the solution does not solve the scramble on the reference simulator")
+        if entry.geometry_variant is not None:
+            replays.append({"variant": entry.geometry_variant, "scramble": notation.format(scramble),
+                            "solution": notation.format(word)})
         return word, per_rung, seconds
 
     if args.scramble is not None:
-        scramble = parse_word(args.scramble, puzzle.move_names)
+        scramble = notation.parse(args.scramble)
         word, per_rung, seconds = solve(scramble)
-        print(f"scramble ({len(scramble)} quarter turns): {alg.format(scramble)}")
-        print(f"solution: {alg.format(word)}")
-        print(f"length: {len(word)} quarter turns, {alg.face_turns(word)} face turns; found in {seconds:.1f} s")
+        print(f"scramble ({len(scramble)} {unit}): {notation.format(scramble)}")
+        print(f"solution: {notation.format(word)}")
+        print(f"length: {notation.describe(word)}; found in {seconds:.1f} s")
         print("per rung: " + ", ".join(f"{n} {c}" for n, c in zip(names, per_rung)))
         print("verified: replaying the solution on the reference simulator gives the solved state")
+        if args.markdown:
+            write_markdown(Path(args.markdown), entry.title, f"{ladder_name}_r{args.radius}, beam {args.beam}",
+                           notation, scramble, word, per_rung, names)
+            print(f"wrote {args.markdown}")
 
     if args.random:
         rng = np.random.default_rng(args.seed)
+        metric_names = [m for m, _ in notation.metrics]
         rows, failures = [], 0
         for k in range(args.random):
-            scramble = rng.integers(0, model.num_moves, size=args.scramble_len).tolist()
+            scramble = rng.integers(0, model.num_moves, size=args.scramble_len or entry.scramble_len).tolist()
             try:
                 word, per_rung, seconds = solve(scramble)
             except LookupError as err:
                 failures += 1
                 print(f"scramble {k}: no solution ({err})", flush=True)
                 continue
-            rows.append(per_rung + [len(word), alg.face_turns(word), seconds])
-            print(f"scramble {k:3d}: {len(word):4d} quarter turns, {alg.face_turns(word):4d} face turns, {seconds:5.1f} s", flush=True)
+            lengths = notation.lengths(word)
+            rows.append(per_rung + [lengths[m] for m in metric_names] + [seconds])
+            print(f"scramble {k:3d}: " + ", ".join(f"{lengths[m]:4d} {m}" for m in metric_names) + f", {seconds:5.1f} s", flush=True)
         if rows:
             table = np.array(rows, dtype=float)
             n = len(names)
             print(f"\nsolved and verified {len(rows)}/{args.random} random scrambles (beam {args.beam})")
-            print("mean quarter turns per rung (before merging across rungs):")
+            print(f"mean {unit} per rung (before merging across rungs):")
             for name, mean in zip(names, table[:, :n].mean(0)):
                 print(f"  {name:12s} {mean:7.1f}")
-            qt, ft, sec = table[:, n], table[:, n + 1], table[:, n + 2]
-            print(f"solution length, quarter turns: mean {qt.mean():.1f}, sd {qt.std():.1f}, min {qt.min():.0f}, max {qt.max():.0f}")
-            print(f"solution length, face turns:    mean {ft.mean():.1f}, sd {ft.std():.1f}, min {ft.min():.0f}, max {ft.max():.0f}")
+            for j, m in enumerate(metric_names):
+                col = table[:, n + j]
+                print(f"solution length, {m + ':':15s} mean {col.mean():.1f}, sd {col.std():.1f}, min {col.min():.0f}, max {col.max():.0f}")
+            sec = table[:, -1]
             print(f"time per solve: mean {sec.mean():.1f} s, max {sec.max():.1f} s")
         print(f"failures: {failures}")
+
+    if args.replay_json:
+        if not replays:
+            sys.exit(f"--replay-json: {entry.title} has no 3D model to replay on")
+        Path(args.replay_json).parent.mkdir(parents=True, exist_ok=True)
+        Path(args.replay_json).write_text(json.dumps(replays, indent=1))
+        print(f"wrote {len(replays)} solutions to {args.replay_json} (replay: tools/export/replay.gen.ts in Cube_Modeling)")
 
 
 if __name__ == "__main__":

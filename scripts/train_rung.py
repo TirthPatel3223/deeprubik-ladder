@@ -1,6 +1,7 @@
 """Train the value network of one learned rung by coset value iteration, then test it.
 
     python scripts/train_rung.py --ladder learned --radius 7 --rung gear_col --updates 200
+    python scripts/train_rung.py --puzzle tangram_extreme --rung large --minutes 60
 
 The ladder is built (from cache) up to the rung, the rung's network is trained, and the
 checkpoint is written next to the rung's cached actions, where the ladder picks it up.
@@ -23,8 +24,7 @@ from core.ladder import Ladder  # noqa: E402
 from core.perm_model import build_point_model  # noqa: E402
 from core.search import beam_search  # noqa: E402
 from core.structure import analyse  # noqa: E402
-from puzzles.maltese_gear.ladder import LADDERS  # noqa: E402
-from puzzles.maltese_gear.puzzle import build_maltese_gear_puzzle  # noqa: E402
+from puzzles.registry import PUZZLES, get_puzzle  # noqa: E402
 
 
 def solver_states(ladder: Ladder, puzzle, model, structure, index: int, n: int,
@@ -51,7 +51,8 @@ def solver_states(ladder: Ladder, puzzle, model, structure, index: int, n: int,
 
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("--ladder", choices=sorted(LADDERS), default="learned")
+    ap.add_argument("--puzzle", choices=sorted(PUZZLES), default="maltese")
+    ap.add_argument("--ladder", default="learned")
     ap.add_argument("--radius", type=int, default=7)
     ap.add_argument("--cache", default=None)
     ap.add_argument("--rung", required=True, help="name of the learned rung to train")
@@ -69,16 +70,23 @@ def main() -> None:
     ap.add_argument("--fresh", action="store_true")
     ap.add_argument("--test", type=int, default=50, help="states to solve with beam search afterwards")
     ap.add_argument("--beam", type=int, default=4096)
+    ap.add_argument("--scramble-len", type=int, default=None, help="scramble length of the test states (default: the puzzle's)")
     ap.add_argument("--weight", type=float, default=0.3, help="weight on the cost so far in the test search (the solver's default)")
     args = ap.parse_args()
 
-    puzzle = build_maltese_gear_puzzle()
+    entry = get_puzzle(args.puzzle)
+    ladders = entry.ladders()
+    if args.ladder not in ladders:
+        ap.error(f"{entry.title} has the ladders {sorted(ladders)}")
+    puzzle = entry.build()
     model = build_point_model(puzzle)
     structure = analyse(model)
-    specs = LADDERS[args.ladder]
+    specs = ladders[args.ladder]
     names = [s.name for s in specs]
+    if args.rung not in names:
+        ap.error(f"the {args.ladder} ladder of the {entry.title} has the rungs {names}")
     index = names.index(args.rung)
-    cache = Path(args.cache) if args.cache else Path("data/ladders") / f"{args.ladder}_r{args.radius}"
+    cache = Path(args.cache) if args.cache else entry.cache_dir(args.ladder, args.radius)
 
     ladder = Ladder(model, structure, specs, mitm_radius=args.radius)
     ladder.build(cache_dir=cache, upto=index + 1)
@@ -106,7 +114,8 @@ def main() -> None:
 
     if args.test:
         # Test on the states the solver will hand this rung, not on the training distribution.
-        real = solver_states(ladder, puzzle, model, structure, index, args.test)
+        real = solver_states(ladder, puzzle, model, structure, index, args.test,
+                             scramble_len=args.scramble_len or entry.scramble_len)
         if real is not None:
             states = torch.as_tensor(real, dtype=torch.uint8, device=value.device)
             print(f"testing on {args.test} scrambles of the whole puzzle with the earlier rungs solved", flush=True)
