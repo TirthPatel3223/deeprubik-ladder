@@ -21,6 +21,13 @@ Building is sequential, because the actions of rung i are harvested from what ca
 
 Solving walks down the rungs. The result is a word in the primitive moves; callers replay
 it on the reference simulator before trusting it.
+
+Caching. Every file a build writes is stamped with a fingerprint (``core/fingerprint.py``) of what
+determined it: the puzzle's tables, the meet-in-the-middle radius and every earlier rung, then the rung's
+own features and settings. A file is reused only when its stamp matches; otherwise it is renamed to
+``*.stale-...`` (never deleted) and rebuilt. A learned rung's actions do not affect later rungs, so changing
+its action settings leaves the later rungs' files valid. Files written before fingerprints existed carry no
+stamp; they are trusted as they are, and the rungs that used them are listed in ``Ladder.legacy``.
 """
 from __future__ import annotations
 
@@ -33,6 +40,7 @@ from typing import Callable, Sequence
 import numpy as np
 
 from core.coset_table import CosetTable, build_table_auto, table_solve
+from core.fingerprint import CACHE_VERSION, digest, feature_key, puzzle_fingerprint
 from core.harvest import WordAlgebra, ball, collisions, schreier_elements
 from core.perm_model import PointModel, Word
 from core.quotient import ActionSet, Quotient
@@ -98,6 +106,17 @@ def _group_order(perms: Sequence[tuple[int, ...]]) -> int:
     return int(PermutationGroup([Permutation(list(p)) for p in uniq]).order())
 
 
+def retire(path: Path, stamp: str | None) -> Path:
+    """Move a stale cache file out of the way (``<name>.stale-<stamp>-<time>``) instead of deleting it."""
+    base = f"{path.name}.stale-{stamp or 'unstamped'}-{time.strftime('%Y%m%d%H%M%S')}"
+    target, k = path.with_name(base), 0
+    while target.exists():
+        k += 1
+        target = path.with_name(f"{base}-{k}")
+    path.rename(target)
+    return target
+
+
 class Ladder:
     def __init__(self, model: PointModel, structure: Structure, specs: Sequence[RungSpec],
                  mitm_radius: int = 7, log: Callable[[str], None] | None = None) -> None:
@@ -108,7 +127,35 @@ class Ladder:
         self.log = log if log is not None else (lambda msg: print(msg, flush=True))
         self.alg = WordAlgebra(model)
         self.rungs: list[Rung] = []
+        self.legacy: list[str] = []          # rungs loaded from cache files that carry no fingerprint
         self._ball: tuple | None = None
+
+    # -- fingerprints ----------------------------------------------------------------
+    def rung_fingerprints(self) -> list[dict]:
+        """For every rung of the specification, the fingerprints of its candidate pool, its actions, its
+        table (None for a learned rung) and the pool it hands to the next rung."""
+        out: list[dict] = []
+        pool = digest("pool0", CACHE_VERSION, puzzle_fingerprint(self.model.puzzle), self.mitm_radius)
+        for i, spec in enumerate(self.specs):
+            feats = [feature_key(fs) for fs in spec.features]
+            actions = digest("actions", pool, i, feats, spec.max_actions, spec.max_cost, spec.check_sample,
+                             spec.check_witnesses, spec.check_candidates, spec.max_bridges)
+            table = digest("table", actions, spec.max_states) if spec.mode == "table" else None
+            # The next pool uses this rung's actions only through the Schreier words of its table.
+            nxt = digest("pool", pool, i, feats, spec.mode, (actions, spec.schreier_cost) if spec.mode == "table" else None)
+            out.append({"pool": pool, "actions": actions, "table": table, "next_pool": nxt})
+            pool = nxt
+        return out
+
+    def fingerprint(self) -> str:
+        """Fingerprint of the built ladder as a solver: every rung's actions and table, and how far each
+        network has been trained. Two solves with equal fingerprints use the same heuristics."""
+        parts = []
+        for rung in self.rungs:
+            fp = rung.info.get("fingerprint", {})
+            h = rung.heuristic
+            parts.append((fp.get("actions"), fp.get("table"), None if h is None else (h.update, h.itr)))
+        return digest("ladder", parts)
 
     # -- features ----------------------------------------------------------------
     def _features(self, spec: RungSpec) -> list[Feature]:
@@ -208,99 +255,140 @@ class Ladder:
         return actions
 
     def build(self, cache_dir: str | Path | None = None, upto: int | None = None) -> "Ladder":
-        model = self.model
         cache = Path(cache_dir) if cache_dir is not None else None
-        pool: list[Word] = [(m,) for m in range(model.num_moves)]
+        fps = self.rung_fingerprints()
+        pool: list[Word] = [(m,) for m in range(self.model.num_moves)]
         fixed: list[Feature] = []                     # features of the rungs already built
         self.rungs = []
+        self.legacy = []
         for i, spec in enumerate(self.specs[:upto]):
-            t0 = time.time()
-            feats = self._features(spec)
-            self.log(f"rung {i} [{spec.name}]  features {[f.name for f in feats]}  mode {spec.mode}")
-            words_file = cache / f"rung{i:02d}_{spec.name}.json" if cache else None
-            table_file = cache / f"rung{i:02d}_{spec.name}.npz" if cache else None
+            rung, pool = self._build_rung(i, spec, pool, fixed, cache, fps[i])
+            fixed = fixed + rung.features
+            self.rungs.append(rung)
+        return self
 
-            if words_file is not None and words_file.exists():
-                saved = json.loads(words_file.read_text())
-                actions = ActionSet.from_words(model, [tuple(w) for w in saved["words"]])
-                actions.inverse = np.array(saved["inverse"], dtype=np.int64)
-                next_pool = [tuple(w) for w in saved["next_pool"]]
-                self.log(f"  loaded {len(actions)} actions from {words_file.name}")
-            else:
-                actions = self._select_actions(spec, feats, pool)
-                next_pool = None
-                self.log(f"  (selection took {time.time() - t0:.1f} s)")
+    def _build_rung(self, i: int, spec: RungSpec, pool: list[Word], fixed: list[Feature], cache: Path | None,
+                    fp: dict) -> tuple[Rung, list[Word]]:
+        """Build rung i from the candidates ``pool`` (words that keep ``fixed`` solved), reusing cache files
+        whose fingerprints match ``fp``. Returns the rung and the candidate pool for the next rung."""
+        model = self.model
+        t0 = time.time()
+        feats = self._features(spec)
+        self.log(f"rung {i} [{spec.name}]  features {[f.name for f in feats]}  mode {spec.mode}")
+        stem = f"rung{i:02d}_{spec.name}"
+        words_file = cache / f"{stem}.json" if cache else None
+        table_file = cache / f"{stem}.npz" if cache else None
+        net_file = cache / f"{stem}.pt" if cache else None
 
-            quotient = Quotient(feats, actions, name=spec.name)
-            rung = Rung(spec=spec, features=feats, actions=actions, quotient=quotient)
+        saved = json.loads(words_file.read_text()) if words_file is not None and words_file.exists() else None
+        legacy = saved is not None and "fingerprint" not in saved
+        stamp = (saved or {}).get("fingerprint") or {}
+        actions: ActionSet | None = None
+        next_pool: list[Word] | None = None
+        if saved is not None and (legacy or stamp.get("actions") == fp["actions"]):
+            actions = ActionSet.from_words(model, [tuple(w) for w in saved["words"]])
+            actions.inverse = np.array(saved["inverse"], dtype=np.int64)
+            self.log(f"  loaded {len(actions)} actions from {words_file.name}"
+                     + (" (older cache file without a fingerprint: trusted as it is)" if legacy else ""))
+        if saved is not None and (legacy or stamp.get("next_pool") == fp["next_pool"]):
+            next_pool = [tuple(w) for w in saved["next_pool"]]
+        if legacy:
+            self.legacy.append(spec.name)
+        if actions is None:
+            if saved is not None:
+                self.log(f"  {words_file.name} was built for other settings: set aside as {retire(words_file, stamp.get('actions')).name}")
+                saved = None
+            actions = self._select_actions(spec, feats, pool)
+            self.log(f"  (selection took {time.time() - t0:.1f} s)")
 
-            if spec.mode == "learned":
-                net_file = cache / f"rung{i:02d}_{spec.name}.pt" if cache else None
-                if net_file is not None and net_file.exists():
-                    from core.davi import RungValue
+        quotient = Quotient(feats, actions, name=spec.name)
+        rung = Rung(spec=spec, features=feats, actions=actions, quotient=quotient)
+        rung.info["fingerprint"] = dict(fp)
+        rung.info["legacy"] = legacy
 
+        if spec.mode == "learned":
+            if net_file is not None and net_file.exists():
+                from core.davi import RungValue
+
+                net_stamp = RungValue.read_fingerprint(net_file)
+                if net_stamp == fp["actions"] or (net_stamp is None and legacy):
                     rung.heuristic = RungValue.from_checkpoint(quotient, net_file)
+                    rung.heuristic.fingerprint = fp["actions"]
                     self.log(f"  loaded value network from {net_file.name} ({rung.heuristic.update} updates)")
                 else:
-                    self.log("  no trained value network yet (scripts/train_rung.py)")
-            if spec.mode == "table":
-                if table_file is not None and table_file.exists():
-                    rung.table = CosetTable.load(table_file)
+                    self.log(f"  {net_file.name} was trained for other actions: set aside as {retire(net_file, net_stamp).name}")
+            if rung.heuristic is None:
+                self.log("  no trained value network yet (scripts/train_rung.py or scripts/auto.py)")
+        if spec.mode == "table":
+            table = None
+            if table_file is not None and table_file.exists():
+                table_stamp = CosetTable.read_fingerprint(table_file)
+                if table_stamp == fp["table"] or (table_stamp is None and legacy):
+                    table = CosetTable.load(table_file)
                 else:
-                    rung.table = build_table_auto(quotient, max_states=spec.max_states)
-                    if table_file is not None:
-                        rung.table.save(table_file)
-                if not rung.table.complete:
-                    raise RuntimeError(f"rung {spec.name}: more than {spec.max_states:,} cosets; split it or use mode='learned'")
-                rung.info["cosets"] = len(rung.table)
-                rung.info["max_cost"] = int(rung.table.dist.max())
-                rung.info["mean_cost"] = float(rung.table.dist.mean())
-                self.log(f"  table: {len(rung.table):,} cosets, worst {rung.info['max_cost']}, "
-                         f"mean {rung.info['mean_cost']:.1f} moves")
+                    self.log(f"  {table_file.name} was built for other actions: set aside as {retire(table_file, table_stamp).name}")
+            if table is None:
+                table = build_table_auto(quotient, max_states=spec.max_states)
+                table.fingerprint = fp["table"]
+                if table_file is not None and table.complete:
+                    table.save(table_file)
+            rung.table = table
+            if not table.complete:
+                raise RuntimeError(f"rung {spec.name}: more than {spec.max_states:,} cosets; split it or use mode='learned'")
+            rung.info["cosets"] = len(table)
+            rung.info["max_cost"] = int(table.dist.max())
+            rung.info["mean_cost"] = float(table.dist.mean())
+            self.log(f"  table: {len(table):,} cosets, worst {rung.info['max_cost']}, "
+                     f"mean {rung.info['mean_cost']:.1f} moves")
 
-            # candidates for the next rung: everything known to fix the features so far
-            fixed = fixed + feats
-            if next_pool is None:
-                found: dict[bytes, Word] = {}
+        if next_pool is None:
+            next_pool = self._next_pool(i, spec, pool, fixed + feats, rung)
+        if words_file is not None and not legacy and (saved is None or stamp != {"actions": fp["actions"], "next_pool": fp["next_pool"]}):
+            if words_file.exists():
+                retire(words_file, stamp.get("actions"))
+            words_file.parent.mkdir(parents=True, exist_ok=True)
+            words_file.write_text(json.dumps({
+                "name": spec.name, "fingerprint": {"actions": fp["actions"], "next_pool": fp["next_pool"]},
+                "words": [list(w) for w in actions.words], "inverse": actions.inverse.tolist(),
+                "next_pool": [list(w) for w in next_pool]}))
+        rung.info["seconds"] = time.time() - t0
+        self.log(f"  done in {rung.info['seconds']:.1f} s")
+        return rung, next_pool
 
-                def offer(words: Sequence[Word]) -> None:
-                    if not len(words):
-                        return
-                    tabs = model.compile_many(words)
-                    ok = self._fixes(fixed, tabs)
-                    for w, t, good in zip(words, tabs, ok):
-                        if good:
-                            key = t.tobytes()
-                            if key not in found or len(w) < len(found[key]):
-                                found[key] = w
+    def _next_pool(self, i: int, spec: RungSpec, pool: list[Word], fixed: list[Feature], rung: Rung) -> list[Word]:
+        """Candidates for the next rung: every known word that keeps ``fixed`` solved."""
+        model = self.model
+        found: dict[bytes, Word] = {}
 
-                offer([w for w in pool if len(w) > 0])
-                b_tables, b_words = self._primitive_ball()
-                mitm = collisions(model, b_tables, b_words, fixed)
-                for key16, w in mitm.items():
-                    key = np.frombuffer(key16, dtype=np.int16).astype(np.int32).tobytes()
+        def offer(words: Sequence[Word]) -> None:
+            if not len(words):
+                return
+            tabs = model.compile_many(words)
+            ok = self._fixes(fixed, tabs)
+            for w, t, good in zip(words, tabs, ok):
+                if good:
+                    key = t.tobytes()
                     if key not in found or len(w) < len(found[key]):
                         found[key] = w
-                n_mitm = len(mitm)
-                n_sch = 0
-                if rung.table is not None:
-                    sch = schreier_elements(model, quotient, rung.table, max_cost=spec.schreier_cost,
-                                            max_count=20_000, n_random=40, seed=i)
-                    n_sch = len(sch)
-                    offer(sch)
-                found.pop(model.identity().tobytes(), None)
-                next_pool = sorted(found.values(), key=lambda w: (len(w), w))
-                self.log(f"  next-rung candidates: {len(next_pool):,} (meet in the middle {n_mitm:,}, Schreier {n_sch:,})")
-                if words_file is not None:
-                    words_file.parent.mkdir(parents=True, exist_ok=True)
-                    words_file.write_text(json.dumps({
-                        "name": spec.name, "words": [list(w) for w in actions.words],
-                        "inverse": actions.inverse.tolist(), "next_pool": [list(w) for w in next_pool]}))
-            pool = next_pool
-            rung.info["seconds"] = time.time() - t0
-            self.rungs.append(rung)
-            self.log(f"  done in {rung.info['seconds']:.1f} s")
-        return self
+
+        offer([w for w in pool if len(w) > 0])
+        b_tables, b_words = self._primitive_ball()
+        mitm = collisions(model, b_tables, b_words, fixed)
+        for key16, w in mitm.items():
+            key = np.frombuffer(key16, dtype=np.int16).astype(np.int32).tobytes()
+            if key not in found or len(w) < len(found[key]):
+                found[key] = w
+        n_mitm = len(mitm)
+        n_sch = 0
+        if rung.table is not None:
+            sch = schreier_elements(model, rung.quotient, rung.table, max_cost=spec.schreier_cost,
+                                    max_count=20_000, n_random=40, seed=i)
+            n_sch = len(sch)
+            offer(sch)
+        found.pop(model.identity().tobytes(), None)
+        next_pool = sorted(found.values(), key=lambda w: (len(w), w))
+        self.log(f"  next-rung candidates: {len(next_pool):,} (meet in the middle {n_mitm:,}, Schreier {n_sch:,})")
+        return next_pool
 
     # -- solving -----------------------------------------------------------------
     def descend(self, lab: np.ndarray, upto: int | None = None, beam: int | None = None,

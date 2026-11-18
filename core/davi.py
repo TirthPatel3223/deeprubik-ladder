@@ -85,6 +85,7 @@ class RungValue:
         self.since_sync = 0
         self.history: list[dict] = []
         self.beam_widths = (256, 4096, 32768)
+        self.fingerprint: str | None = None   # the rung's actions it was trained for (core/fingerprint.py)
 
     # -- data generation -----------------------------------------------------------
     @torch.no_grad()
@@ -228,7 +229,7 @@ class RungValue:
         torch.save({"net": self.net.state_dict(), "target": self.target.state_dict(), "opt": self.opt.state_dict(),
                     "cfg": asdict(self.cfg), "itr": self.itr, "update": self.update,
                     "target_updates": self.target_updates, "since_sync": self.since_sync,
-                    "target_is_zero": self.target_is_zero,
+                    "target_is_zero": self.target_is_zero, "fingerprint": self.fingerprint,
                     "history": self.history, "n_actions": self.q.n_actions, "n_slots": self.q.n_slots}, path)
 
     def load(self, path: str | Path) -> "RungValue":
@@ -241,4 +242,10 @@ class RungValue:
         self.target_updates, self.since_sync = data["target_updates"], data["since_sync"]
         self.target_is_zero = data.get("target_is_zero", False)
         self.history = data["history"]
+        self.fingerprint = data.get("fingerprint")
         return self
+
+    @staticmethod
+    def read_fingerprint(path: str | Path) -> str | None:
+        """The fingerprint stored in a checkpoint (None for checkpoints from older builds)."""
+        return torch.load(Path(path), map_location="cpu", weights_only=False).get("fingerprint")
