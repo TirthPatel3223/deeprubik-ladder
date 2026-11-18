@@ -12,8 +12,12 @@ Walk length
 When to stop
     Every few minutes the network is tested on a fixed set of states as the solver hands them to the rung
     (deep scrambles with the earlier rungs solved, ``Ladder.sample_rung_states``), with the solver's first
-    beam search. Phase A: train until it solves every test state. Phase B: keep training while the mean
-    solution cost still drops by more than 1% over three tests. A time cap per rung bounds both.
+    beam search, 15 s per state. Phase A: train until it solves every test state. Phase B: keep training while
+    the mean solution cost still drops by more than 1% over three tests; then keep the network of the best
+    test, which need not be the last. A time cap per rung bounds both. A test of a weak network stops once
+    a state has failed and half the round's training time has gone into testing (on the Maltese colour rung
+    the first test of the whole set took 16 minutes against 5 of training), so testing never dominates;
+    a network that solves every state is always tested on all of them.
 Repairs
     If the share of solved test states stops rising in phase A, the autopilot changes, in order: the walk
     length (x1.5, twice); the action set (twice the cheapest moves and twice the moves that leave the cheap
@@ -56,8 +60,9 @@ class AutoTrainConfig:
     round_minutes: float = 5.0          # training time between two tests
     eval_beam: int = 4096
     eval_weight: float = 0.3
-    eval_time: float = 30.0             # seconds per test state
+    eval_time: float = 15.0             # seconds per test state
     eval_give_up: int = 8               # a test stops early if none of its first states is solved
+    eval_budget: float = 0.5            # ... or, once a state has failed, after this share of the round's training time
     target: float = 1.0                 # share of test states solved that ends phase A
     stall_tests: int = 3                # phase A: tests without progress before a repair
     min_updates_per_repair: int = 30    # ... and at least this many updates since the last one
@@ -113,14 +118,19 @@ def mixing_length(curve: np.ndarray, tol: float = 0.02) -> int:
 
 
 def evaluate(value: RungValue, states: np.ndarray, width: int, weight: float, time_cap: float,
-             give_up: int = 8) -> dict:
-    """Beam search from every state with the network. Stops early when none of the first ``give_up``
-    states is solved. Every path found is checked on the rung's quotient."""
+             give_up: int = 8, budget: float | None = None) -> dict:
+    """Beam search from every state with the network, in order; every path found is checked on the rung's
+    quotient. Stops early when none of the first ``give_up`` states is solved, or when ``budget`` seconds
+    have passed and some state has already failed (the test can no longer be perfect; the share solved so
+    far is the estimate). A network that solves every state is always tested on all of them."""
     q = value.q
     solved, costs, actions, secs, tried = 0, [], [], [], 0
     steps = max(200, 6 * value.cfg.walk_max)
+    t_start = time.time()
     for vec in states:
         if tried >= give_up and solved == 0:
+            break
+        if budget is not None and solved < tried and tried >= give_up and time.time() - t_start > budget:
             break
         tried += 1
         t0 = time.time()
@@ -139,7 +149,7 @@ def evaluate(value: RungValue, states: np.ndarray, width: int, weight: float, ti
             actions.append(len(acts))
     with torch.no_grad():
         v = value.value(torch.as_tensor(states, dtype=torch.uint8, device=value.device)).cpu().numpy()
-    return {"solved": solved / tried, "tested": tried, "n": len(states),
+    return {"solved": solved / tried, "tested": tried, "n": len(states), "complete": tried == len(states),
             "mean_cost": float(np.mean(costs)) if costs else None,
             "mean_actions": float(np.mean(actions)) if actions else None,
             "seconds_per_state": float(np.mean(secs)), "mean_value": float(v.mean())}
@@ -155,9 +165,14 @@ def _stalled(tests: list[dict], k: int) -> bool:
     return max(t["solved"] for t in tests[-k:]) <= before
 
 
+def _full(t: dict, target: float) -> bool:
+    """A test on every test state that solved (at least) the target share of them."""
+    return t["solved"] >= target and t.get("complete", True) and t["mean_cost"] is not None
+
+
 def _plateaued(tests: list[dict], k: int, gain: float, target: float) -> bool:
     """Among tests that solved everything, the last k did not lower the best mean cost by more than ``gain``."""
-    full = [t["mean_cost"] for t in tests if t["solved"] >= target and t["mean_cost"] is not None]
+    full = [t["mean_cost"] for t in tests if _full(t, target)]
     if len(full) <= k:
         return False
     return min(full[-k:]) > min(full[:-k]) * (1 - gain)
@@ -261,8 +276,10 @@ def autotrain_rung(ladder: Ladder, index: int, cache_dir: str | Path, cfg: AutoT
                                         force_sync=cfg.force_sync), device)
     value.cfg.walk_max = record["walk_max"]
     value.fingerprint = fp
+    best_file = cache / f"{stem}.best.pt"
     if extra_states is not None:
         record["phase"] = "A"
+        record.pop("best", None)                # a larger test set: earlier best scores are not comparable
     record["status"] = "running"
 
     def save() -> None:
@@ -282,7 +299,8 @@ def autotrain_rung(ladder: Ladder, index: int, cache_dir: str | Path, cfg: AutoT
             break
         round_limit = min(60 * cfg.round_minutes, max(1.0, budget - (time.time() - t_start)))
         value.train(max_updates=value.update + 1_000_000, time_limit=round_limit, checkpoint=net_file, log=quiet)
-        ev = evaluate(value, test, cfg.eval_beam, cfg.eval_weight, cfg.eval_time, cfg.eval_give_up)
+        ev = evaluate(value, test, cfg.eval_beam, cfg.eval_weight, cfg.eval_time, cfg.eval_give_up,
+                      budget=cfg.eval_budget * round_limit)
         hist = value.history[-1] if value.history else {}
         record["minutes"] = minutes_before + (time.time() - t_start) / 60
         row = {"update": value.update, "minutes": round(record["minutes"], 2), "walk_max": value.cfg.walk_max,
@@ -292,9 +310,12 @@ def autotrain_rung(ladder: Ladder, index: int, cache_dir: str | Path, cfg: AutoT
         log(f"  update {value.update:4d} ({record['minutes']:5.1f} min): solved {100 * ev['solved']:5.1f}% of "
             f"{ev['tested']} test states, mean cost {cost}, {ev['seconds_per_state']:.1f} s each; "
             f"loss {row['loss'] if row['loss'] is None else round(row['loss'], 4)}, walks {value.cfg.walk_max}")
+        if _full(ev, cfg.target) and ev["mean_cost"] < record.get("best", {}).get("mean_cost", math.inf):
+            value.save(best_file)               # the network to keep if later ones are not better
+            record["best"] = {"update": value.update, "mean_cost": ev["mean_cost"], "test_index": len(record["tests"]) - 1}
 
         if record["phase"] == "A":
-            if ev["solved"] >= cfg.target:
+            if _full(ev, cfg.target):
                 record["phase"] = "B"
                 log("  phase B: every test state solved; training on while solutions get shorter")
             elif (_stalled(record["tests"][repair_mark:], cfg.stall_tests)
@@ -324,12 +345,14 @@ def autotrain_rung(ladder: Ladder, index: int, cache_dir: str | Path, cfg: AutoT
                     record["repairs"].append({"kind": "actions", "update": value.update, "actions": q.n_actions,
                                               "max_actions": new_spec.max_actions, "max_bridges": new_spec.max_bridges})
                     record["fingerprint"], record["actions"] = fp, q.n_actions
+                    record.pop("best", None)            # saved for the old action set
                 elif done["width"] < cfg.max_width_repairs:
                     log(f"  repair: no progress; a new, wider network ({cfg.wider_res_dim} units)")
                     record["repairs"].append({"kind": "width", "update": value.update, "res_dim": cfg.wider_res_dim})
                     record["res_dim"] = cfg.wider_res_dim
                     value = RungValue(q, replace(value.cfg, res_dim=cfg.wider_res_dim), device)
                     value.fingerprint = fp
+                    record.pop("best", None)            # saved for the narrower network
                 else:
                     record["status"] = "failed"
                     log("  every repair has been tried and the rung still does not solve its test states")
@@ -344,6 +367,13 @@ def autotrain_rung(ladder: Ladder, index: int, cache_dir: str | Path, cfg: AutoT
             break
         save()
 
+    best = record.get("best")
+    last_full = next((t for t in reversed(record["tests"]) if _full(t, cfg.target)), None)
+    if best and best_file.exists() and last_full is not None and best["mean_cost"] < last_full["mean_cost"]:
+        log(f"  keeping the network of update {best['update']} (mean cost {best['mean_cost']:.1f}); "
+            f"the last one scored {last_full['mean_cost']:.1f}")
+        value.load(best_file)
+        value.fingerprint = fp
     value.save(net_file)
     rung.heuristic = value
     log(f"  final test on {len(final)} other states:")

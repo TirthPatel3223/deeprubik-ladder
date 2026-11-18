@@ -93,7 +93,56 @@ def test_one_command_with_an_automatic_ladder(tmp_path) -> None:
     cfg = AutoConfig(ladder="auto", radius=4, propose_radius=4, train=TINY, accept=QUICK_ACCEPT)
     summary = run_auto(get_puzzle("toy"), tmp_path, cfg, log=_quiet)
     assert summary["verdict"] == "PASS"
-    assert summary["stages"]["ladder"]["rungs"] == ["orbit0_multiset", "orbit0_full"]
+    assert summary["stages"]["ladder"]["rungs"] == ["first"]                 # the whole toy fits one exact table
+
+
+def test_a_test_stops_early_only_after_a_failure(toy, monkeypatch) -> None:
+    """With no time budget left, a test still runs to the end while every state is solved, and stops once one
+    has failed: a weak network costs little, a perfect one is always checked on every state."""
+    import numpy as np
+
+    import core.autotrain as at
+    from core.davi import DaviConfig, RungValue
+
+    _, model, st = toy
+    ladder = Ladder(model, st, TOY_LEARNED, mitm_radius=4, log=_quiet).build()
+    q = ladder.rungs[1].quotient
+    value = RungValue(q, DaviConfig(res_dim=16, num_blocks=1), device="cpu")
+    goal = q.goal[None, :]
+    other = q.step(goal, 0)                                        # one action away: not the goal
+    monkeypatch.setattr(at, "beam_search", lambda tq, vf, start, **kw: ([], 0.0) if bool(tq.is_goal(start[None])[0]) else None)
+
+    # budget -1: already spent (a zero budget can read as unspent on a coarse clock)
+    perfect = at.evaluate(value, np.repeat(goal, 20, axis=0), 64, 0.3, 5.0, give_up=8, budget=-1.0)
+    assert perfect["complete"] and perfect["tested"] == 20 and perfect["solved"] == 1.0
+    mixed = at.evaluate(value, np.concatenate([np.repeat(goal, 10, axis=0), np.repeat(other, 20, axis=0)]),
+                        64, 0.3, 5.0, give_up=8, budget=-1.0)
+    assert not mixed["complete"] and mixed["tested"] == 11 and mixed["solved"] == 10 / 11
+
+
+def test_the_best_network_is_kept(toy, tmp_path, monkeypatch) -> None:
+    """Phase B keeps training while the cost falls; if later networks score worse, the best one is restored."""
+    import core.autotrain as at
+
+    _, model, st = toy
+    ladder = Ladder(model, st, TOY_LEARNED, mitm_radius=4, log=_quiet).build(cache_dir=tmp_path)
+    scores = iter([50.0, 40.0, 45.0, 46.0, 47.0])              # TINY stops after 2 tests without a gain
+    seen: list[int] = []
+
+    def scripted(value, states, *a, **kw):
+        if "budget" not in kw:                                  # the final test on the other states
+            return {"solved": 1.0, "tested": len(states), "n": len(states), "complete": True, "mean_cost": 40.0,
+                    "mean_actions": 5.0, "seconds_per_state": 0.0, "mean_value": 0.0, "update": value.update}
+        seen.append(value.update)
+        return {"solved": 1.0, "tested": len(states), "n": len(states), "complete": True, "mean_cost": next(scores),
+                "mean_actions": 5.0, "seconds_per_state": 0.0, "mean_value": 0.0}
+
+    monkeypatch.setattr(at, "evaluate", scripted)
+    cfg = replace(TINY, round_minutes=0.02, max_minutes=5.0)
+    ladder, record = at.autotrain_rung(ladder, 1, tmp_path, cfg, log=_quiet)
+    assert record["status"] == "done" and record["best"]["mean_cost"] == 40.0
+    assert ladder.rungs[1].heuristic.update == seen[1]                 # the network of the second test
+    assert record["final"]["update"] == seen[1]
 
 
 @pytest.mark.parametrize("bad", ["no_such_ladder"])
