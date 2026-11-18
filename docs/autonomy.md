@@ -183,11 +183,24 @@ short another one is stored, so a third of the states reach the rotation table i
 
 - **One network for the gear rotation is shorter than two tables**: 65.3 quarter turns against 76.0 (14%).
   `hierarchical_solver.md` §7 listed it as untried; this is its first measurement.
-- **The Maltese difference is the ring.** The designed rung takes the 128 cheapest moves and their inverses
-  (138, costs 12 to 14) where the hand ladder takes 72 (all cost 12). Each beam step expands about twice
-  as many children (its tests took 9 to 13 s per state, against 4 s), its network needed 57 minutes and a
-  walk repair to solve every test state (8 minutes with 72 moves), and its solutions are longer: 283.0
-  quarter turns per solve with its best network against 247.4, more than the rotation network saves.
+- **The Maltese difference is the ring's network, not its moves or its states.** The designed rung takes
+  the 128 cheapest moves and their inverses: the hand ladder's 72 (all cost 12) and 66 of cost 14. Each
+  ring network was run with each move set on the designed rung's 64 final-test states (beam 4096, 60 s per
+  state, every state solved), quarter turns per solve `[measured: runs/ring_swap_72.log, ring_swap_138.log]`:
+
+  | Ring network | 72 moves | 138 moves |
+  |---|---|---|
+  | trained with 72 moves (Run C) | 248.4 | 242.4 |
+  | trained with 138 moves (Run B, best) | 268.5 | 274.2 |
+
+  The network trained with 138 moves costs 20 more per solve with the same 72 moves and 32 more with the
+  same 138 (paired over the 64 states, about 3.5 standard errors each); the move set changes either network
+  by about 6, within the noise. Nor are the states harder: Run C's ring solves them at 248.4, as its own
+  (249.4). Its training went differently. With 138 moves a test state took 9 to 13 s against the 15 s cap
+  (4 s with 72), so tests ended early on time-outs (at the end, 2 of 64 states took longer than 15 s; with
+  60 s none failed). The autopilot read that as no progress and lengthened the walks from 35 to 53, and with
+  only two complete tests in phase B it ran to the time cap. Whether the longer walks or the training with
+  138 moves made the network weaker is not yet separated.
 - **The Tangram difference is the last step.** Orbits 0 and 6 become two tables (27.7 + 20.3 = 48.0 steps)
   where the hand ladder has one network (`small`, 40.4). Rule 4 divides by the length of the macros a rung
   leaves behind, so a rung that finishes the puzzle scores 0 and a merged last rung never wins. The
@@ -208,11 +221,13 @@ runs/v3_accept_tangram_original_table.log]`.
   network exists, and a poor choice costs GPU time before the autopilot or the acceptance test catches it.
 - **The design is greedy.** It looks one rung ahead and proposes one ladder. If the acceptance test fails in
   an exact table (a state outside it), the run reports the gap; it does not redesign the ladder.
-- **Two choices are not yet made by measurement**, and both designed ladders lose their extra length there
-  (section 4): the last rung (the score cannot value a rung that finishes the puzzle, so it is never merged
-  with the one before), and the number of moves of a network rung (the 128 cheapest and their inverses, plus
-  moves that leave their subgroup when they do not generate the rung; the Maltese ring trained faster, and
-  solved in fewer moves, with the 72 of the hand ladder).
+- **The last rung is not chosen by measurement.** The score cannot value a rung that finishes the puzzle,
+  so it is never merged with the one before; the designed Tangram ladder loses its extra length there
+  (section 4).
+- **The autopilot's tests allow a fixed 15 s per state.** A rung with twice the moves searches about half
+  as fast, so its tests time out on states its network can solve, and the autopilot reads that as no
+  progress. On the designed Maltese ring this lengthened the walks, ran to the time cap and left a weaker
+  network, which is where that ladder's extra length comes from (section 4).
 - **Coverage is proved exactly only when pieces can be told apart.** With identical-looking pieces of several
   colours (the Maltese gears) the completeness check cannot decide, and the acceptance test stands in: it
   finds gaps that affect at least about 3% of states.

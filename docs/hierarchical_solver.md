@@ -290,10 +290,10 @@ EVAL_PLACEHOLDER
   the 2⁴⁶ rotation states with 157 cheap corner-fixing macros is shorter: 65.3 quarter turns
   per solve on the acceptance states, trained by `scripts/auto.py` in 40 minutes
   (`docs/autonomy.md`). `[measured]`
-- **The ring uses 72 of its 304 distinct cheap moves.** More actions lengthen training; in the
-  designed ladder of `docs/autonomy.md` they did not shorten solutions. Its ring rung has 138
-  moves (costs 12 to 14): the network needed 57 minutes to solve every test state (8 with these
-  72) and costs 283.0 quarter turns per solve against 247.4. `[measured, in another ladder]`
+- **The ring uses 72 of its 304 distinct cheap moves.** Adding the 66 next cheapest (cost 14)
+  changes the length by about 6 quarter turns, within the noise, for either of two trained ring
+  networks. The network trained with all 138, in the designed ladder of `docs/autonomy.md`, was
+  weaker: 20 to 32 quarter turns longer per solve on the same states and moves. `[measured]`
 - **Each rung is solved without regard to the next.** The reference solver keeps several
   landings per rung and gains about 10 moves from it `[src]`. `[not done]`
 - **Limited-horizon Bellman learning** (backing up a short search tree instead of one step)
