@@ -481,3 +481,33 @@ class Ladder:
     def ready(self) -> bool:
         """True when every rung of the specification is built and has a table or a trained network."""
         return len(self.rungs) == len(self.specs) and all(r.table is not None or r.heuristic is not None for r in self.rungs)
+
+    def sample_rung_states(self, index: int, n: int, seed: int = 0, min_depth: int = 2000, max_depth: int = 5000,
+                           time_limit: float | None = 120.0, max_failures: int | None = None) -> np.ndarray:
+        """Feature vectors of rung ``index`` exactly as the solver meets them: random scrambles of the whole
+        puzzle (depth uniform in min_depth..max_depth) with rungs 0 .. index-1 solved by this ladder.
+
+        These, not random walks with the rung's own actions, are what a learned rung has to be tested on: if
+        a few actions are the only link between large parts of the rung, walks stay in one part, and a
+        network that solves every walk can still fail on almost every scramble. A scramble an earlier rung
+        cannot solve (within ``time_limit`` seconds) is replaced by another; more than ``max_failures`` such
+        scrambles (default n) raise the last ``RungFailure``."""
+        puzzle = self.model.puzzle
+        q = self.rungs[index].quotient
+        rng = np.random.default_rng(seed)
+        out: list[np.ndarray] = []
+        failures, limit = 0, n if max_failures is None else max_failures
+        while len(out) < n:
+            depth = int(rng.integers(min_depth, max_depth + 1))
+            state = puzzle.apply_word(puzzle.goal, rng.integers(0, puzzle.num_moves, size=depth).tolist())
+            deadline = None if time_limit is None else time.time() + time_limit
+            try:
+                lab, _, _ = self.descend(self.structure.decode(state), upto=index, deadline=deadline)
+            except RungFailure as err:
+                failures += 1
+                self.log(f"  sampling states for rung {index}: an earlier rung failed ({err}); drawing another scramble")
+                if failures > limit:
+                    raise
+                continue
+            out.append(q.project(lab))
+        return np.stack(out) if out else np.empty((0, q.n_slots), dtype=np.uint8)

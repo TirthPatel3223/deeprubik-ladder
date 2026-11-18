@@ -63,13 +63,18 @@ class DaviConfig:
     seed: int = 0
 
 
+def default_device() -> str:
+    """The GPU when there is one, otherwise the CPU (slow, but a trained ladder still loads and solves)."""
+    return "cuda" if torch.cuda.is_available() and torch.cuda.device_count() > 0 else "cpu"
+
+
 class RungValue:
     """A trained (or training) value network for one rung, with search on top."""
 
-    def __init__(self, quotient: Quotient, cfg: DaviConfig | None = None, device: str = "cuda") -> None:
+    def __init__(self, quotient: Quotient, cfg: DaviConfig | None = None, device: str | None = None) -> None:
         self.q = quotient
         self.cfg = cfg or DaviConfig()
-        self.tq = TorchQuotient(quotient, device)
+        self.tq = TorchQuotient(quotient, device or default_device())
         self.device = self.tq.device
         torch.manual_seed(self.cfg.seed)
         self.scale = float(quotient.costs.mean())
@@ -223,7 +228,7 @@ class RungValue:
 
     # -- persistence ---------------------------------------------------------------------
     @staticmethod
-    def from_checkpoint(quotient: Quotient, path: str | Path, device: str = "cuda") -> "RungValue":
+    def from_checkpoint(quotient: Quotient, path: str | Path, device: str | None = None) -> "RungValue":
         """Rebuild a trained rung value from its checkpoint (network size comes from the file)."""
         data = torch.load(Path(path), map_location="cpu", weights_only=False)
         return RungValue(quotient, DaviConfig(**data["cfg"]), device).load(path)

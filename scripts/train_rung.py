@@ -36,17 +36,11 @@ def solver_states(ladder: Ladder, puzzle, model, structure, index: int, n: int,
     are the only link between large parts of the rung (see the warning in
     ``Ladder._select_actions``), walks stay in one part, and a network that solves every
     walk can still fail on almost every scramble."""
-    q = ladder.rungs[index].quotient
-    rng = np.random.default_rng(seed)
-    out = []
-    for _ in range(n):
-        state = puzzle.apply_word(puzzle.goal, rng.integers(0, model.num_moves, size=scramble_len).tolist())
-        try:
-            lab, _, _ = ladder.descend(structure.decode(state), upto=index)
-        except (LookupError, RuntimeError):
-            return None
-        out.append(q.project(lab))
-    return np.stack(out)
+    try:
+        return ladder.sample_rung_states(index, n, seed=seed, min_depth=scramble_len, max_depth=scramble_len,
+                                         time_limit=None, max_failures=0)
+    except (LookupError, RuntimeError):
+        return None
 
 
 def main() -> None:
