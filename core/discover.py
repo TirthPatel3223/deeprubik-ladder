@@ -129,31 +129,51 @@ def linked_orbits(model: PointModel, structure: Structure) -> list[list[int]]:
             j = group[0]
             if structure.orbits[j].n_pieces != orb.n_pieces or orb.n_pieces == 1:
                 continue
-            # look for a relabelling of slots that turns one action into the other
-            n = orb.n_pieces
-            for image_of_zero in range(n):
-                pi = np.full(n, -1)
-                pi[0] = image_of_zero
-                stack, ok = [0], True
-                while stack and ok:
-                    x = stack.pop()
-                    for m in range(model.num_moves):
-                        y, target = int(perms[i][m][x]), int(perms[j][m][pi[x]])
-                        if pi[y] < 0:
-                            pi[y] = target
-                            stack.append(y)
-                        elif pi[y] != target:
-                            ok = False
-                            break
-                if ok and (pi >= 0).all():
-                    group.append(i)
-                    placed = True
-                    break
-            if placed:
+            if _relabel(perms[i], perms[j]) is not None:
+                group.append(i)
+                placed = True
                 break
         if not placed:
             groups.append([i])
     return groups
+
+
+def _relabel(perm_a: np.ndarray, perm_b: np.ndarray) -> np.ndarray | None:
+    """A relabelling pi of slots that turns one slot action into the other (perm_b[m][pi[x]] == pi[perm_a[m][x]]
+    for every move m), or None. ``perm_*`` are (moves, slots) arrays: the slot each slot is filled from."""
+    n = perm_a.shape[1]
+    for image_of_zero in range(n):
+        pi = np.full(n, -1)
+        pi[0] = image_of_zero
+        stack, ok = [0], True
+        while stack and ok:
+            x = stack.pop()
+            for m in range(perm_a.shape[0]):
+                y, target = int(perm_a[m][x]), int(perm_b[m][pi[x]])
+                if pi[y] < 0:
+                    pi[y] = target
+                    stack.append(y)
+                elif pi[y] != target:
+                    ok = False
+                    break
+        if ok and (pi >= 0).all():
+            return pi
+    return None
+
+
+def orbit_links(model: PointModel, structure: Structure) -> dict[int, tuple[int, np.ndarray]]:
+    """For every orbit: the first orbit of its linked group and the map from that orbit's slots to its own.
+    Linked orbits are permuted identically by every move, so their pieces can only be arranged together."""
+    perms = [_slot_perms(model, o) for o in structure.orbits]
+    links: dict[int, tuple[int, np.ndarray]] = {}
+    for group in linked_orbits(model, structure):
+        ref = group[0]
+        links[ref] = (ref, np.arange(structure.orbits[ref].n_pieces))
+        for o in group[1:]:
+            pi = _relabel(perms[ref], perms[o])
+            if pi is not None:
+                links[o] = (ref, pi)
+    return links
 
 
 def _fixes(features: Sequence[Feature], tables: np.ndarray) -> np.ndarray:
@@ -268,33 +288,51 @@ def _assignments(m: np.ndarray, max_exact: int = 16) -> int:
     return total
 
 
-def goal_arrangements(features: Sequence[Feature]) -> int:
+def _goal_matrix(feats: Sequence[Feature]) -> np.ndarray:
+    """m[slot, piece] = ways piece can sit in slot showing the goal value of every feature of one orbit."""
+    orb = feats[0].orbit
+    labels = orb.points
+    hits = orb.arrangement[:, labels, 0] >= 0                         # (slots, labels): the label can sit there
+    for f in feats:
+        hits &= f.table[:, labels] == f.goal[:, None]                 # ... and shows the goal class
+    piece = orb.slot_of[labels]                                       # home piece of each label
+    m = np.zeros((orb.n_pieces, orb.n_pieces), dtype=np.int64)
+    for b in range(orb.n_pieces):
+        np.add.at(m[b], piece[hits[b]], 1)
+    return m
+
+
+def goal_arrangements(features: Sequence[Feature], links: dict[int, tuple[int, np.ndarray]] | None = None) -> int:
     """How many arrangements of the features' pieces show the goal value of every feature: at least the size
-    of the goal's stabiliser in any group acting on those pieces."""
+    of the goal's stabiliser in any group acting on those pieces.
+
+    Orbits that ``links`` (``orbit_links``) ties together are permuted identically by every move, so one
+    arrangement of slots serves them all: they are counted together (a gear's colour and its rotation), not
+    as independent arrangements, which would overcount by up to n!."""
     by_orbit: dict[int, list[Feature]] = {}
     for f in features:
         by_orbit.setdefault(f.orbit.index, []).append(f)
+    clusters: dict[int, list[tuple[np.ndarray, np.ndarray]]] = {}     # reference orbit -> (matrix, slot map)
+    for o, feats in by_orbit.items():
+        ref, pi = links[o] if links and o in links else (o, np.arange(feats[0].orbit.n_pieces))
+        clusters.setdefault(ref, []).append((_goal_matrix(feats), pi))
     total = 1
-    for feats in by_orbit.values():
-        orb = feats[0].orbit
-        labels = orb.points
-        hits = orb.arrangement[:, labels, 0] >= 0                     # (slots, labels): the label can sit there
-        for f in feats:
-            hits &= f.table[:, labels] == f.goal[:, None]             # ... and shows the goal class
-        piece = orb.slot_of[labels]                                   # home piece of each label
-        m = np.zeros((orb.n_pieces, orb.n_pieces), dtype=np.int64)
-        for b in range(orb.n_pieces):
-            np.add.at(m[b], piece[hits[b]], 1)
-        total *= _assignments(m)
+    for parts in clusters.values():
+        joint = None
+        for m, pi in parts:
+            mapped = m[np.ix_(pi, pi)]                                # in the reference orbit's slots and pieces
+            joint = mapped.astype(np.int64) if joint is None else joint * mapped
+        total *= _assignments(joint)
     return total
 
 
-def estimated_bits(features: Sequence[Feature], actions: ActionSet) -> float | None:
+def estimated_bits(features: Sequence[Feature], actions: ActionSet,
+                   links: dict[int, tuple[int, np.ndarray]] | None = None) -> float | None:
     """log2 of the coset count, from below, when it is too large for a table: log2 |H| - log2 A (module
     docstring). None if the group order was not measured."""
     if actions.group_order is None:
         return None
-    return max(0.0, math.log2(actions.group_order) - math.log2(max(goal_arrangements(features), 1)))
+    return max(0.0, math.log2(actions.group_order) - math.log2(max(goal_arrangements(features, links), 1)))
 
 
 # -- the proposal ---------------------------------------------------------------------------------------------
@@ -311,6 +349,7 @@ def propose_ladder(model: PointModel, structure: Structure, radius: int = 6, tab
     prim = ActionSet.primitives(model)
     tables, words, _ = ball(model, prim, radius)
     everything = [structure.feature(o.index, "full") for o in structure.orbits]
+    links = orbit_links(model, structure)
     helper = Ladder(model, structure, [], mitm_radius=radius, log=quiet)
     helper._ball = (tables, words)
 
@@ -412,7 +451,7 @@ def propose_ladder(model: PointModel, structure: Structure, radius: int = 6, tab
         left = stabiliser_words(feats)
         lens = [len(w) for w in left[:n_shortest]]
         c = Candidate(tuple((f.orbit.index, "full") for f in feats), "first",
-                      math.log2(len(t)) if exact else (estimated_bits(feats, prim) or math.log2(table_budget)),
+                      math.log2(len(t)) if exact else (estimated_bits(feats, prim, links) or math.log2(table_budget)),
                       exact, len(t) if exact else None, float(np.mean(lens)) if lens else math.inf, len(left),
                       whole=True, n_actions=len(prim), mean_cost=1.0, quotient=q, table=t if exact else None)
         log(f"first rung, with the primitive moves: orbits {first}")
@@ -457,7 +496,7 @@ def propose_ladder(model: PointModel, structure: Structure, radius: int = 6, tab
             q = Quotient(feats, actions)
             t = build_table_auto(q, max_states=table_budget) if q.packable else None
             exact = t is not None and t.complete
-            bits = math.log2(len(t)) if exact else (estimated_bits(feats, actions) or math.log2(table_budget))
+            bits = math.log2(len(t)) if exact else (estimated_bits(feats, actions, links) or math.log2(table_budget))
             left = stabiliser_words(fixed + feats)
             lens = [len(w) for w in left[:n_shortest]]
             scored.append(Candidate(fspecs, name, bits, exact, len(t) if exact else None,

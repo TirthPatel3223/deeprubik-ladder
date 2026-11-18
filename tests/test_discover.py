@@ -8,7 +8,7 @@ import math
 import numpy as np
 
 from core.discover import (_assignments, _permanent, forced_all, generator_periods, goal_arrangements,
-                           linked_orbits, propose_ladder)
+                           linked_orbits, orbit_links, propose_ladder)
 from core.ladder import Ladder
 from puzzles.tangram import ladder as tl
 from puzzles.tangram.ladder import O_BOTTOM
@@ -105,9 +105,21 @@ def test_permanent_against_brute_force() -> None:
 
 
 def test_goal_arrangements_count_look_alikes(maltese, tangram) -> None:
-    _, _, mst = maltese
+    _, mmodel, mst = maltese
     assert goal_arrangements([mst.feature(2, "full")]) == math.factorial(4) ** 6     # 6 colours x 4 identical gears
     ring = goal_arrangements([mst.feature(1, "full")])
     assert 1024 <= ring <= 4 ** 6 * 2 ** 12                                         # the true stabiliser has 1024
-    _, _, tst = tangram
+    _, tmodel, tst = tangram
     assert goal_arrangements([tst.feature(tl.LARGE_TRI_A, "full")]) == math.factorial(6)   # the 6 empty places
+
+    # A gear's colour and rotation move together: one arrangement of the gears serves both orbits. Counted
+    # apart, the rotation orbit alone allows 24! goal-looking arrangements (every gear looks alike there).
+    gears = [mst.feature(2, "full"), mst.feature(3, "full")]
+    assert goal_arrangements(gears, orbit_links(mmodel, mst)) == math.factorial(4) ** 6
+    assert goal_arrangements(gears) == math.factorial(4) ** 6 * math.factorial(24)
+    # The two large-triangle classes of the Tangram also move together, and the empty places of one are the
+    # occupied places of the other, so only the solved arrangement shows the goal: the joint rung has
+    # |H| = 12!/2 cosets, which is what the table ladder measured (665,280 x 360).
+    large = [tst.feature(tl.LARGE_TRI_A, "full"), tst.feature(tl.LARGE_TRI_B, "full")]
+    assert goal_arrangements(large, orbit_links(tmodel, tst)) == 1
+    assert 665_280 * 360 == math.factorial(12) // 2
