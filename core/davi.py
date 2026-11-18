@@ -39,7 +39,7 @@ import torch
 
 from core.nnet import ResnetFC, evaluate
 from core.quotient import Quotient, TorchQuotient
-from core.search import beam_search, greedy_rollout
+from core.search import SearchSchedule, beam_search, greedy_rollout
 
 
 @dataclass
@@ -199,19 +199,24 @@ class RungValue:
             self.save(checkpoint)
 
     # -- solving -------------------------------------------------------------------------
-    def solve(self, vec, width: int | None = None, weight: float = 0.3, max_steps: int | None = None) -> list[int] | None:
+    def solve(self, vec, width: int | None = None, weight: float = 0.3, max_steps: int | None = None,
+              deadline: float | None = None, schedule: SearchSchedule | None = None) -> list[int] | None:
         """Actions taking the feature vector ``vec`` to the rung's goal, or None.
 
-        Beam search with the given width; if it finds nothing, the width is multiplied by 8
-        (twice at most). Without ``width`` the default schedule ``beam_widths`` is used.
-        ``weight`` scales the accumulated cost g in f = weight * g + h (default: 0.3).
+        Tries the beam searches of ``schedule`` in turn. By default: the given width, and if it finds
+        nothing the width multiplied by 8 (twice at most, never beyond 32,768); without ``width``, the
+        widths in ``beam_widths``. ``weight`` scales the accumulated cost g in f = weight * g + h.
+        Raises ``core.search.SearchTimeout`` if ``deadline`` (a ``time.time()`` value) passes first.
         """
         start = torch.as_tensor(vec, dtype=torch.uint8, device=self.device)
-        max_w = self.beam_widths[-1]  # 32,768 upper bound to fit comfortably in GPU memory
-        widths = self.beam_widths if width is None else tuple(dict.fromkeys(min(w, max_w) for w in (width, 8 * width, 64 * width)))
+        if schedule is None:
+            if width is None:
+                schedule = SearchSchedule(tuple((w, weight) for w in self.beam_widths))
+            else:
+                schedule = SearchSchedule.standard(width, weight, max_width=self.beam_widths[-1])
         steps = max(200, 6 * self.cfg.walk_max) if max_steps is None else max_steps
-        for w in widths:
-            found = beam_search(self.tq, self.value, start, width=w, max_steps=steps, weight=weight)
+        for w, wt in schedule.attempts:
+            found = beam_search(self.tq, self.value, start, width=w, max_steps=steps, weight=wt, deadline=deadline)
             if found is not None:
                 return found[0]
         return None

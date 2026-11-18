@@ -44,9 +44,25 @@ from core.fingerprint import CACHE_VERSION, digest, feature_key, puzzle_fingerpr
 from core.harvest import WordAlgebra, ball, collisions, schreier_elements
 from core.perm_model import PointModel, Word
 from core.quotient import ActionSet, Quotient
+from core.search_schedule import SearchSchedule, SearchTimeout
 from core.structure import Feature, Structure
 
 FeatureSpec = tuple            # (orbit, kind) or (orbit, kind, mask)
+
+
+class RungFailure(LookupError):
+    """A rung could not take the state to its goal. ``reason`` is one of
+
+    * ``outside_table``: the state is not in the rung's exact table, so its actions do not reach it
+      (a coverage gap: more search cannot help);
+    * ``search_exhausted``: every beam search of the schedule ended without reaching the goal;
+    * ``timeout``: the deadline passed first.
+    """
+
+    def __init__(self, rung: str, reason: str, message: str) -> None:
+        super().__init__(message)
+        self.rung = rung
+        self.reason = reason
 
 
 @dataclass
@@ -392,29 +408,37 @@ class Ladder:
 
     # -- solving -----------------------------------------------------------------
     def descend(self, lab: np.ndarray, upto: int | None = None, beam: int | None = None,
-                weight: float = 0.3) -> tuple[np.ndarray, list[Word], list[int]]:
+                weight: float = 0.3, deadline: float | None = None,
+                schedule: SearchSchedule | None = None) -> tuple[np.ndarray, list[Word], list[int]]:
         """Solve the first ``upto`` rungs (all of them by default) of a labelled state.
 
         Returns the labels afterwards, the words applied and the cost spent per rung. With
         ``upto=i`` the result projected on rung i is a state exactly as the solver meets it,
         which is what a learned rung has to be tested on.
-        ``beam`` is the beam width used on the learned rungs (None: each rung's default)."""
+        ``beam`` is the beam width used on the learned rungs (None: each rung's default), or
+        ``schedule`` the full list of searches they try. ``deadline`` (a ``time.time()`` value) is shared
+        by all rungs. Raises ``RungFailure`` naming the rung and the reason when one cannot be solved."""
         lab = np.asarray(lab, dtype=np.int32)
         pieces: list[Word] = []
         per_rung: list[int] = []
         for rung in self.rungs[:upto]:
             q = rung.quotient
+            name = rung.spec.name
             vec = q.project(lab)
             if rung.table is not None:
                 acts = table_solve(q, rung.table, vec)
                 if acts is None:
-                    raise LookupError(f"rung {rung.spec.name}: state is outside the table (its actions do not generate enough)")
+                    raise RungFailure(name, "outside_table",
+                                      f"rung {name}: state is outside the table (its actions do not generate enough)")
             elif rung.heuristic is not None:
-                acts = rung.heuristic.solve(vec, width=beam, weight=weight)
+                try:
+                    acts = rung.heuristic.solve(vec, width=beam, weight=weight, deadline=deadline, schedule=schedule)
+                except SearchTimeout:
+                    raise RungFailure(name, "timeout", f"rung {name}: out of time before a solution was found") from None
                 if acts is None:
-                    raise LookupError(f"rung {rung.spec.name}: search found no solution")
+                    raise RungFailure(name, "search_exhausted", f"rung {name}: search found no solution")
             else:
-                raise RuntimeError(f"rung {rung.spec.name} has no table and no trained heuristic")
+                raise RuntimeError(f"rung {name} has no table and no trained heuristic")
             cost = 0
             for a in acts:
                 lab = lab[rung.actions.tables[a]]
@@ -423,15 +447,20 @@ class Ladder:
             per_rung.append(cost)
         return lab, pieces, per_rung
 
-    def solve_labels(self, lab: np.ndarray, beam: int | None = None, weight: float = 0.3) -> tuple[Word, list[int]]:
+    def solve_labels(self, lab: np.ndarray, beam: int | None = None, weight: float = 0.3,
+                     deadline: float | None = None, schedule: SearchSchedule | None = None) -> tuple[Word, list[int]]:
         """Solve a labelled state. Returns the reduced primitive word (turns merged across rungs, and
         across commuting moves) and the cost spent per rung."""
-        _, pieces, per_rung = self.descend(lab, beam=beam, weight=weight)
+        _, pieces, per_rung = self.descend(lab, beam=beam, weight=weight, deadline=deadline, schedule=schedule)
         return self.alg.simplify(self.alg.concat(*pieces)), per_rung
 
-    def solve(self, state: np.ndarray, beam: int | None = None, weight: float = 0.3) -> tuple[Word, list[int]]:
-        """Solve a visible state of the underlying GatherPuzzle."""
-        return self.solve_labels(self.structure.decode(state), beam=beam, weight=weight)
+    def solve(self, state: np.ndarray, beam: int | None = None, weight: float = 0.3,
+              time_limit: float | None = None, schedule: SearchSchedule | None = None) -> tuple[Word, list[int]]:
+        """Solve a visible state of the underlying GatherPuzzle, within ``time_limit`` seconds if given.
+        Raises ``RungFailure`` (a ``LookupError``) naming the rung that could not be solved and why."""
+        deadline = None if time_limit is None else time.time() + time_limit
+        return self.solve_labels(self.structure.decode(state), beam=beam, weight=weight, deadline=deadline,
+                                 schedule=schedule)
 
     def ready(self) -> bool:
         """True when every rung of the specification is built and has a table or a trained network."""
