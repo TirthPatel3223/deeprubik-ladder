@@ -80,6 +80,22 @@ class RungSpec:
     max_states: int = 60_000_000         # table mode: give up beyond this many cosets
 
 
+def specs_to_json(specs: Sequence[RungSpec]) -> list[dict]:
+    """A ladder specification as JSON-ready data (``specs_from_json`` reads it back)."""
+    from dataclasses import asdict
+
+    def feature_json(fs: FeatureSpec) -> list:
+        key = feature_key(fs)
+        return [key[0], key[1]] + ([list(key[2])] if len(key) > 2 else [])
+
+    return [{**asdict(spec), "features": [feature_json(fs) for fs in spec.features]} for spec in specs]
+
+
+def specs_from_json(data: Sequence[dict]) -> list[RungSpec]:
+    """Inverse of ``specs_to_json``."""
+    return [RungSpec(**{**d, "features": [feature_key(fs) for fs in d["features"]]}) for d in data]
+
+
 @dataclass
 class Rung:
     spec: RungSpec
