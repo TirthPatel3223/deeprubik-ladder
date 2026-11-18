@@ -85,7 +85,11 @@ costs 451 quarter turns against 88 for the repaired network.
   | Tangram `small` | 192 | 6 | 21 | 20 |
 
 - **Phase A.** Train in rounds of 5 minutes; after each, beam search (width 4096, the solver's first search)
-  on the test states. Continue until all are solved.
+  on the test states. Continue until all are solved. Each state gets 15 s for up to 72 moves and in
+  proportion to the moves above that (138 moves: 28.75 s), since a beam step scores every move; with one
+  fixed limit, slow reads as unsolved (section 4). A test of a network that has solved nothing stops once
+  half the round's training time is spent, and the final test after 8 failed states, so that the longer
+  limits never let testing dominate.
 - **Repairs.** If the share solved has not risen in 3 tests (and at least 30 updates have passed), change,
   in order: the walk length (x1.5, twice); the action set (twice the cheapest moves and twice the moves that
   leave the cheap moves' subgroup, the remedy that fixed `gear_col`; the network keeps its weights, since its
@@ -200,7 +204,8 @@ short another one is stored, so a third of the states reach the rotation table i
   (4 s with 72), so tests ended early on time-outs (at the end, 2 of 64 states took longer than 15 s; with
   60 s none failed). The autopilot read that as no progress and lengthened the walks from 35 to 53, and with
   only two complete tests in phase B it ran to the time cap. Whether the longer walks or the training with
-  138 moves made the network weaker is not yet separated.
+  138 moves made the network weaker is not yet separated. Tests now allow time in proportion to the moves
+  (section 3); this ring has not been trained again since.
 - **The Tangram difference is the last step.** Orbits 0 and 6 become two tables (27.7 + 20.3 = 48.0 steps)
   where the hand ladder has one network (`small`, 40.4). Rule 4 divides by the length of the macros a rung
   leaves behind, so a rung that finishes the puzzle scores 0 and a merged last rung never wins. The
@@ -224,10 +229,10 @@ runs/v3_accept_tangram_original_table.log]`.
 - **The last rung is not chosen by measurement.** The score cannot value a rung that finishes the puzzle,
   so it is never merged with the one before; the designed Tangram ladder loses its extra length there
   (section 4).
-- **The autopilot's tests allow a fixed 15 s per state.** A rung with twice the moves searches about half
-  as fast, so its tests time out on states its network can solve, and the autopilot reads that as no
-  progress. On the designed Maltese ring this lengthened the walks, ran to the time cap and left a weaker
-  network, which is where that ladder's extra length comes from (section 4).
+- **The test time per state is new and untried in training.** The Maltese runs had a fixed 15 s per state,
+  which failed the designed ring's good states for being slow and left a weaker network (section 4). Tests
+  now allow time in proportion to the moves (section 3), but no rung has been trained again with it, so
+  whether it closes that ladder's extra length is not measured.
 - **Coverage is proved exactly only when pieces can be told apart.** With identical-looking pieces of several
   colours (the Maltese gears) the completeness check cannot decide, and the acceptance test stands in: it
   finds gaps that affect at least about 3% of states.

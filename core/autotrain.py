@@ -12,13 +12,15 @@ Walk length
 When to stop
     Every few minutes the network is tested on a fixed set of states as the solver hands them to the rung
     (deep scrambles with the earlier rungs solved, ``Ladder.sample_rung_states``), with the solver's first
-    beam search, 15 s per state. Phase A: train until it solves every test state. Phase B: keep training while
-    the mean solution cost still drops by more than 1% over three tests. A time cap per rung bounds both.
-    At the end the network of the best test that solved every state is kept, which need not be the last
-    (later networks can score worse, or fail some states). A test of a weak network stops once
-    a state has failed and half the round's training time has gone into testing (on the Maltese colour rung
-    the first test of the whole set took 16 minutes against 5 of training), so testing never dominates;
-    a network that solves every state is always tested on all of them.
+    beam search: 15 s per state for up to 72 moves, and in proportion to the moves above that, since a beam
+    step scores every move (``time_per_test_state``). Phase A: train until it solves every test state.
+    Phase B: keep training while the mean solution cost still drops by more than 1% over three tests. A time
+    cap per rung bounds both. At the end the network of the best test that solved every state is kept, which
+    need not be the last (later networks can score worse, or fail some states). A test of a weak network
+    stops once a state has failed and half the round's training time has gone into testing, or at once if
+    nothing has been solved by then (on the Maltese colour rung the first test of the whole set took 16
+    minutes against 5 of training), so testing never dominates; the final test stops after 8 failed states.
+    A network that solves every state is always tested on all of them.
 Repairs
     If the share of solved test states stops rising in phase A, the autopilot changes, in order: the walk
     length (x1.5, twice); the action set (twice the cheapest moves and twice the moves that leave the cheap
@@ -61,9 +63,11 @@ class AutoTrainConfig:
     round_minutes: float = 5.0          # training time between two tests
     eval_beam: int = 4096
     eval_weight: float = 0.3
-    eval_time: float = 15.0             # seconds per test state
+    eval_time: float = 15.0             # seconds per test state for a rung of up to eval_time_moves moves,
+    eval_time_moves: int = 72           # ... and in proportion to the moves for more (time_per_test_state)
     eval_give_up: int = 8               # a test stops early if none of its first states is solved
     eval_budget: float = 0.5            # ... or, once a state has failed, after this share of the round's training time
+    final_max_failures: int = 8         # the final test stops once this many of its states have failed
     target: float = 1.0                 # share of test states solved that ends phase A
     stall_tests: int = 3                # phase A: tests without progress before a repair
     min_updates_per_repair: int = 30    # ... and at least this many updates since the last one
@@ -118,20 +122,36 @@ def mixing_length(curve: np.ndarray, tol: float = 0.02) -> int:
     return int(hit[0]) + 1 if len(hit) else len(curve)
 
 
+def time_per_test_state(cfg: AutoTrainConfig, n_actions: int) -> float:
+    """Seconds allowed per test state: ``eval_time`` for up to ``eval_time_moves`` moves, in proportion above.
+
+    A beam step scores every move from every state in the beam, so a rung with twice the moves searches about
+    half as fast. Under one fixed limit a good network on such a rung fails states for being slow, and the
+    autopilot reads that as no progress: the designed Maltese ring (138 moves) timed out at 15 s per state,
+    had its walks lengthened, ran to the time cap and came out 20 to 32 quarter turns longer per solve than
+    the network trained with 72. Measured per state at beam 4096: up to 18 s with 138 moves, about 4 s with 72."""
+    return cfg.eval_time * max(1.0, n_actions / cfg.eval_time_moves)
+
+
 def evaluate(value: RungValue, states: np.ndarray, width: int, weight: float, time_cap: float,
-             give_up: int = 8, budget: float | None = None) -> dict:
-    """Beam search from every state with the network, in order; every path found is checked on the rung's
-    quotient. Stops early when none of the first ``give_up`` states is solved, or when ``budget`` seconds
-    have passed and some state has already failed (the test can no longer be perfect; the share solved so
-    far is the estimate). A network that solves every state is always tested on all of them."""
+             give_up: int = 8, budget: float | None = None, max_failures: int | None = None) -> dict:
+    """Beam search from every state with the network, in order, ``time_cap`` seconds each; every path found
+    is checked on the rung's quotient. Stops early when none of the first ``give_up`` states is solved; once
+    ``budget`` seconds have passed and some state has failed (after ``give_up`` states, or at once if none
+    has been solved: the test can no longer be perfect, and the share solved so far is the estimate); or once
+    ``max_failures`` states have failed. With time allowed in proportion to the moves, these keep a test of a
+    weak network short. A network that solves every state is always tested on all of them."""
     q = value.q
     solved, costs, actions, secs, tried = 0, [], [], [], 0
     steps = max(200, 6 * value.cfg.walk_max)
     t_start = time.time()
     for vec in states:
-        if tried >= give_up and solved == 0:
+        spent = budget is not None and time.time() - t_start > budget
+        if solved == 0 and tried and (tried >= give_up or spent):
             break
-        if budget is not None and solved < tried and tried >= give_up and time.time() - t_start > budget:
+        if spent and solved < tried and tried >= give_up:
+            break
+        if max_failures is not None and tried - solved >= max_failures:
             break
         tried += 1
         t0 = time.time()
@@ -151,7 +171,7 @@ def evaluate(value: RungValue, states: np.ndarray, width: int, weight: float, ti
     with torch.no_grad():
         v = value.value(torch.as_tensor(states, dtype=torch.uint8, device=value.device)).cpu().numpy()
     return {"solved": solved / tried, "tested": tried, "n": len(states), "complete": tried == len(states),
-            "mean_cost": float(np.mean(costs)) if costs else None,
+            "time_cap": time_cap, "mean_cost": float(np.mean(costs)) if costs else None,
             "mean_actions": float(np.mean(actions)) if actions else None,
             "seconds_per_state": float(np.mean(secs)), "mean_value": float(v.mean())}
 
@@ -264,7 +284,7 @@ def autotrain_rung(ladder: Ladder, index: int, cache_dir: str | Path, cfg: AutoT
         mixed_match = float(curve[-len(curve) // 10:].mean())
         log(f"rung {index} [{rung.spec.name}]: {q.n_slots} slots x {q.n_classes} classes, {q.n_actions} actions; "
             f"walks mix in {mix} actions (slots at goal: {mixed_match:.3f} mixed, {test_match:.3f} on solver states) "
-            f"-> walks of up to {walk} actions")
+            f"-> walks of up to {walk} actions; tests allow {time_per_test_state(cfg, q.n_actions):.0f} s per state")
         record = {"fingerprint": fp, "rung": rung.spec.name, "status": "running", "phase": "A", "mixing_length": mix,
                   "walk_max": walk, "res_dim": cfg.res_dim, "actions": q.n_actions, "repairs": [], "tests": [],
                   "minutes": 0.0, "config": asdict(cfg)}
@@ -300,8 +320,8 @@ def autotrain_rung(ladder: Ladder, index: int, cache_dir: str | Path, cfg: AutoT
             break
         round_limit = min(60 * cfg.round_minutes, max(1.0, budget - (time.time() - t_start)))
         value.train(max_updates=value.update + 1_000_000, time_limit=round_limit, checkpoint=net_file, log=quiet)
-        ev = evaluate(value, test, cfg.eval_beam, cfg.eval_weight, cfg.eval_time, cfg.eval_give_up,
-                      budget=cfg.eval_budget * round_limit)
+        ev = evaluate(value, test, cfg.eval_beam, cfg.eval_weight, time_per_test_state(cfg, value.q.n_actions),
+                      cfg.eval_give_up, budget=cfg.eval_budget * round_limit)
         hist = value.history[-1] if value.history else {}
         record["minutes"] = minutes_before + (time.time() - t_start) / 60
         row = {"update": value.update, "minutes": round(record["minutes"], 2), "walk_max": value.cfg.walk_max,
@@ -381,7 +401,8 @@ def autotrain_rung(ladder: Ladder, index: int, cache_dir: str | Path, cfg: AutoT
     value.save(net_file)
     rung.heuristic = value
     log(f"  final test on {len(final)} other states:")
-    record["final"] = evaluate(value, final, cfg.eval_beam, cfg.eval_weight, cfg.eval_time, give_up=len(final))
+    record["final"] = evaluate(value, final, cfg.eval_beam, cfg.eval_weight, time_per_test_state(cfg, value.q.n_actions),
+                               give_up=len(final), max_failures=cfg.final_max_failures)
     fin = record["final"]
     log(f"  solved {100 * fin['solved']:.1f}%, mean cost "
         f"{'-' if fin['mean_cost'] is None else round(fin['mean_cost'], 1)}, {fin['seconds_per_state']:.1f} s each")

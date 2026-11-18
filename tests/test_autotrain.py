@@ -8,7 +8,8 @@ import pytest
 
 from core.acceptance import AcceptanceConfig
 from core.auto import AutoConfig, run_auto
-from core.autotrain import AutoTrainConfig, _plateaued, _stalled, autotrain_rung, match_curve, mixing_length
+from core.autotrain import (AutoTrainConfig, _plateaued, _stalled, autotrain_rung, match_curve, mixing_length,
+                            time_per_test_state)
 from core.ladder import Ladder, RungSpec
 from core.quotient import TorchQuotient
 from puzzles.registry import PuzzleEntry, get_puzzle
@@ -34,6 +35,14 @@ def test_progress_rules() -> None:
     assert _plateaued(rows((1.0, 45.0), (1.0, 45.2), (1.0, 44.9)), 2, 0.01, 1.0)
     assert not _plateaued(rows((1.0, 45.0), (1.0, 46.0), (1.0, 40.0)), 2, 0.01, 1.0)
     assert not _plateaued(rows((0.9, 30.0), (1.0, 45.0), (1.0, 45.0)), 2, 0.01, 1.0)   # partial solves do not count
+
+
+def test_test_states_get_time_in_proportion_to_the_moves() -> None:
+    """A beam step scores every move, so a rung with more moves gets more time per test state, never less."""
+    cfg = AutoTrainConfig()
+    assert time_per_test_state(cfg, 7) == 15.0 and time_per_test_state(cfg, 72) == 15.0
+    assert time_per_test_state(cfg, 138) == pytest.approx(28.75)          # the designed Maltese ring
+    assert time_per_test_state(cfg, 376) == pytest.approx(15.0 * 376 / 72)
 
 
 def test_walk_length_rule_on_the_toy(toy) -> None:
@@ -136,9 +145,40 @@ def test_a_test_stops_early_only_after_a_failure(toy, monkeypatch) -> None:
     # budget -1: already spent (a zero budget can read as unspent on a coarse clock)
     perfect = at.evaluate(value, np.repeat(goal, 20, axis=0), 64, 0.3, 5.0, give_up=8, budget=-1.0)
     assert perfect["complete"] and perfect["tested"] == 20 and perfect["solved"] == 1.0
-    mixed = at.evaluate(value, np.concatenate([np.repeat(goal, 10, axis=0), np.repeat(other, 20, axis=0)]),
-                        64, 0.3, 5.0, give_up=8, budget=-1.0)
+    some = np.concatenate([np.repeat(goal, 10, axis=0), np.repeat(other, 20, axis=0)])
+    mixed = at.evaluate(value, some, 64, 0.3, 5.0, give_up=8, budget=-1.0)
     assert not mixed["complete"] and mixed["tested"] == 11 and mixed["solved"] == 10 / 11
+    assert mixed["time_cap"] == 5.0
+
+    # with time in proportion to the moves a failing state can take long, so a test of a network that solves
+    # nothing stops as soon as the budget is gone, and the final test stops after a number of failures
+    none = np.repeat(other, 20, axis=0)
+    spent = at.evaluate(value, none, 64, 0.3, 5.0, give_up=8, budget=-1.0)
+    assert spent["tested"] == 1 and spent["solved"] == 0.0
+    assert at.evaluate(value, none, 64, 0.3, 5.0, give_up=8)["tested"] == 8     # no budget: the first 8 decide
+    final = at.evaluate(value, some, 64, 0.3, 5.0, give_up=len(some), max_failures=3)
+    assert final["tested"] == 13 and final["solved"] == 10 / 13
+
+
+def test_the_autopilot_gives_tests_time_in_proportion_to_the_moves(toy, tmp_path, monkeypatch) -> None:
+    """Every test of the rung, the final one included, allows the time of ``time_per_test_state``."""
+    import core.autotrain as at
+
+    _, model, st = toy
+    ladder = Ladder(model, st, TOY_LEARNED, mitm_radius=4, log=_quiet).build(cache_dir=tmp_path)
+    n = ladder.rungs[1].quotient.n_actions
+    calls: list[tuple[bool, float]] = []
+
+    def scripted(value, states, *a, **kw):
+        calls.append(("budget" not in kw, a[2]))                    # (the final test?, seconds per state)
+        return {"solved": 1.0, "tested": len(states), "n": len(states), "complete": True, "mean_cost": 40.0,
+                "mean_actions": 5.0, "seconds_per_state": 0.0, "mean_value": 0.0}
+
+    monkeypatch.setattr(at, "evaluate", scripted)
+    cfg = replace(TINY, round_minutes=0.02, max_minutes=5.0, eval_time=10.0, eval_time_moves=max(1, n // 4))
+    at.autotrain_rung(ladder, 1, tmp_path, cfg, log=_quiet)
+    assert len(calls) >= 2 and calls[-1][0] and not calls[0][0]
+    assert all(cap == pytest.approx(10.0 * n / max(1, n // 4)) for _, cap in calls) and calls[0][1] > 10.0
 
 
 def test_the_best_network_is_kept(toy, tmp_path, monkeypatch) -> None:
