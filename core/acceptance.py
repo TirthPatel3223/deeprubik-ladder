@@ -158,7 +158,7 @@ def run_acceptance(ladder: Ladder, puzzle: GatherPuzzle, cfg: AcceptanceConfig |
 
     # -- pass 1 -------------------------------------------------------------------------------------------
     log(f"acceptance pass 1: {cfg.n_states} states of {cfg.min_depth}..{cfg.max_depth} random moves, "
-        f"{cfg.time_limit:g} s each (beams {[w for w, _ in standard.attempts]})")
+        f"{cfg.time_limit:g} s each (beams {[w for w, _ in standard.attempts]}, weight {cfg.weight:g})")
     done = {s["index"] for s in report["states"]}
     for k, (depth, scramble) in enumerate(scrambles):
         if k in done:

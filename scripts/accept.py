@@ -45,6 +45,8 @@ def main() -> None:
     ap.add_argument("--extended-time-limit", type=float, default=defaults.extended_time_limit, help="seconds per state, pass 2")
     ap.add_argument("--pass-fraction", type=float, default=defaults.pass_fraction, help="solved in pass 1 to get a pass 2")
     ap.add_argument("--beam", type=int, default=defaults.beam)
+    ap.add_argument("--weight", type=float, default=defaults.weight,
+                    help="weight of the path cost g in the beam search's f = weight * g + h")
     ap.add_argument("--no-fail-fast", action="store_true", help="run every state even once the verdict is decided")
     args = ap.parse_args()
 
@@ -83,7 +85,8 @@ def main() -> None:
 
     cfg = AcceptanceConfig(n_states=args.n, min_depth=args.min_depth, max_depth=args.max_depth, seed=args.seed,
                            time_limit=args.time_limit, extended_time_limit=args.extended_time_limit,
-                           pass_fraction=args.pass_fraction, beam=args.beam, fail_fast=not args.no_fail_fast)
+                           pass_fraction=args.pass_fraction, beam=args.beam, weight=args.weight,
+                           fail_fast=not args.no_fail_fast)
     out = Path(args.out) if args.out else Path("runs") / "acceptance" / f"{entry.name}_{label}.json"
     report = run_acceptance(ladder, puzzle, cfg, report_path=out, notation=entry.notation(ladder.alg), rerun=args.rerun)
     print(f"report: {out}", flush=True)
