@@ -287,18 +287,24 @@ EVAL_PLACEHOLDER
 
 - **Length.** COMPARISON_PLACEHOLDER
 - **Gear rotation takes two table rungs and about 76 quarter turns.** One learned rung over
-  the 2⁴⁶ rotation states with the cheap corner-fixing macros would likely be shorter.
-  `[not done]`
-- **The ring uses 72 of its 304 distinct cheap moves.** More actions lengthen training and
-  shorten solutions. `[not done]`
+  the 2⁴⁶ rotation states with 157 cheap corner-fixing macros is shorter: 65.3 quarter turns
+  per solve on the acceptance states, trained by `scripts/auto.py` in 40 minutes
+  (`docs/autonomy.md`). `[measured]`
+- **The ring uses 72 of its 304 distinct cheap moves.** More actions lengthen training; in the
+  designed ladder of `docs/autonomy.md` they did not shorten solutions. Its ring rung has 138
+  moves (costs 12 to 14): the network needed 57 minutes to solve every test state (8 with these
+  72) and costs 283.0 quarter turns per solve against 247.4. `[measured, in another ladder]`
 - **Each rung is solved without regard to the next.** The reference solver keeps several
   landings per rung and gains about 10 moves from it `[src]`. `[not done]`
 - **Limited-horizon Bellman learning** (backing up a short search tree instead of one step)
   is the DeepXube option aimed at the value saturation seen here. `[not done]`
 - **Design note method B** (primitive excursions that break and re-solve earlier rungs) is
   not implemented. Method A was enough to solve.
-- **Rung ordering** (`core/discover.py`) is greedy and looks one rung ahead. It reproduces
-  this ladder, but its proposal for a new puzzle should be checked by building it.
+- **Rung ordering** (`core/discover.py`) is greedy and looks one rung ahead. For this puzzle it
+  proposes corners, then gear rotation, gear colour and the ring as three value networks: the order
+  above, with one network over the 2^46 rotation states in place of the two rotation tables. Its
+  proposals are now built, trained and tested by `scripts/auto.py` (`docs/autonomy.md`); that
+  ladder passes the acceptance test at 431.7 quarter turns against 406.1 for this one.
 - **Other puzzles.** Nothing in `core/` is specific to the Maltese cube. A new puzzle needs
   its move tables as a `GatherPuzzle` and a rung list. The Tangram Cube Extreme is the
   second: its tables are compiled from its 3D model (`core/geometry.py`), see `docs/tangram.md`.

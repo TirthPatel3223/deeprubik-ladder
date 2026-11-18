@@ -11,6 +11,7 @@ runs/
 data/generated/
 data/ball/
 data/ladders/
+data/auto/
 archive/checkpoints/
 archive/data/
 *.pt
