@@ -2,7 +2,7 @@
 
     python scripts/accept.py --puzzle maltese                              # the puzzle's default ladder
     python scripts/accept.py --puzzle tangram_extreme --ladder learned
-    python scripts/accept.py --tables my_puzzle.npz --ladder-file data/auto/my_puzzle/ladder.json
+    python scripts/accept.py --tables my_puzzle.npz --ladder-file data/auto/my_puzzle/auto_r7/ladder.json
 
 The protocol and what it can show are in core/acceptance.py. The verdict is PASS (all solved within 60 s),
 PASS_SLOW (at least 90 within 60 s, the rest within 300 s with wider searches) or FAIL; the exit code is 0
@@ -19,6 +19,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from core.acceptance import AcceptanceConfig, run_acceptance  # noqa: E402
+from core.fingerprint import puzzle_fingerprint  # noqa: E402
 from core.ladder import Ladder, specs_from_json  # noqa: E402
 from core.perm_model import build_point_model  # noqa: E402
 from core.structure import analyse  # noqa: E402
@@ -30,7 +31,8 @@ def main() -> None:
     add_puzzle_arguments(ap)
     ap.add_argument("--ladder", default=None, help="a registered ladder of the puzzle (default: the puzzle's)")
     ap.add_argument("--ladder-file", default=None, help="a ladder specification written by scripts/auto.py (ladder.json)")
-    ap.add_argument("--radius", type=int, default=7)
+    ap.add_argument("--radius", type=int, default=None,
+                    help="meet-in-the-middle radius of the build (default: the ladder file's, else 7)")
     ap.add_argument("--cache", default=None, help="ladder cache (default: the registered one, or 'rungs' next to --ladder-file)")
     ap.add_argument("--out", default=None, help="JSON report (default: runs/acceptance/<puzzle>_<ladder>.json)")
     ap.add_argument("--rerun", action="store_true", help="start over even if the report has a verdict")
@@ -47,20 +49,31 @@ def main() -> None:
     args = ap.parse_args()
 
     entry = entry_from_args(args)
+    puzzle = entry.build()
+    model = build_point_model(puzzle)
     if args.ladder_file:
-        specs = specs_from_json(json.loads(Path(args.ladder_file).read_text()))
+        saved = json.loads(Path(args.ladder_file).read_text())
+        if isinstance(saved, list):                         # a bare list of rung specifications
+            saved = {"specs": saved}
+        fp = saved.get("puzzle_fingerprint")
+        if fp is not None and fp != puzzle_fingerprint(puzzle):
+            ap.error(f"{args.ladder_file} was designed for another puzzle than {entry.title}")
+        # the cache was built with the file's radius; another radius would not match it and rebuild every rung
+        radius = saved.get("radius") or args.radius or 7
+        if args.radius is not None and args.radius != radius:
+            ap.error(f"the ladder in {args.ladder_file} was built with radius {radius}, not {args.radius}")
+        specs = specs_from_json(saved["specs"])
         label = Path(args.ladder_file).parent.name or "ladder"
         cache = Path(args.cache) if args.cache else Path(args.ladder_file).parent / "rungs"
     else:
+        radius = args.radius if args.radius is not None else 7
         ladders = entry.ladders()
         name = args.ladder or entry.default_ladder
         if name not in ladders:
             ap.error(f"{entry.title} has the ladders {sorted(ladders)}; give --ladder-file for an automatic one")
-        specs, label = ladders[name], f"{name}_r{args.radius}"
-        cache = Path(args.cache) if args.cache else entry.cache_dir(name, args.radius)
-    puzzle = entry.build()
-    model = build_point_model(puzzle)
-    ladder = Ladder(model, analyse(model), specs, mitm_radius=args.radius, log=lambda _msg: None).build(cache_dir=cache)
+        specs, label = ladders[name], f"{name}_r{radius}"
+        cache = Path(args.cache) if args.cache else entry.cache_dir(name, radius)
+    ladder = Ladder(model, analyse(model), specs, mitm_radius=radius, log=lambda _msg: None).build(cache_dir=cache)
     if not ladder.ready():
         missing = [r.spec.name for r in ladder.rungs if r.table is None and r.heuristic is None]
         print(f"the ladder in {cache} is not complete; untrained rungs: {missing}", flush=True)

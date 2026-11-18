@@ -118,11 +118,23 @@ def run_auto(entry, out_dir: str | Path | None = None, cfg: AutoConfig | None = 
     out.mkdir(parents=True, exist_ok=True)
     log = _tee(log, out / "auto.log")
     t_start = time.time()
+    now = time.strftime("%Y-%m-%d %H:%M:%S")
+    # a resumed run keeps its first start and adds its earlier minutes (as of their last saved stage)
+    try:
+        earlier = json.loads((out / "run.json").read_text()) if (out / "run.json").exists() else {}
+    except json.JSONDecodeError:                    # cut short while being written
+        earlier = {}
+    if (earlier.get("puzzle"), earlier.get("ladder_source")) != (entry.name, cfg.ladder):
+        earlier = {}
+    minutes_before = float(earlier.get("minutes", 0.0))
+    invocations = earlier.get("invocations", 1) + 1 if earlier else 1
     summary: dict = {"puzzle": entry.name, "title": entry.title, "ladder_source": cfg.ladder, "config": asdict(cfg),
-                     "started": time.strftime("%Y-%m-%d %H:%M:%S"), "stages": {}}
+                     "started": earlier.get("started", now), "invocations": invocations,
+                     "this_invocation_started": now, "stages": {}}
 
     def save_summary() -> None:
-        summary["minutes"] = round((time.time() - t_start) / 60, 1)
+        summary["minutes_this_invocation"] = round((time.time() - t_start) / 60, 1)
+        summary["minutes"] = round(minutes_before + (time.time() - t_start) / 60, 1)
         (out / "run.json").write_text(json.dumps(summary, indent=1, default=str))
 
     log(f"=== {entry.title}: automatic run in {out}")
@@ -221,8 +233,10 @@ def _train_brief(record: dict) -> dict:
 
 
 def _report_md(entry, structure, ladder: Ladder, training: dict, report: dict, summary: dict) -> str:
+    runs = summary.get("invocations", 1)
     lines = [f"# Automatic run: {entry.title}", "",
-             f"Verdict **{summary['verdict']}** after {summary['minutes']} minutes (ladder: {summary['ladder_source']}).", "",
+             f"Verdict **{summary['verdict']}** after {summary['minutes']} minutes"
+             f"{f' over {runs} runs of the command' if runs > 1 else ''} (ladder: {summary['ladder_source']}).", "",
              "## Structure", "", "```", structure.describe(), "```", "",
              "## Ladder", "", "| # | Rung | Features | Heuristic | Actions | Costs |", "|---|---|---|---|---|---|"]
     for i, r in enumerate(ladder.rungs):

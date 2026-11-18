@@ -87,6 +87,27 @@ def test_one_command_on_a_hand_written_ladder(toy, tmp_path) -> None:
     assert "PASS" in (tmp_path / "report.md").read_text()
     again = run_auto(entry, tmp_path, cfg, log=_quiet)                         # everything resumes from files
     assert again["verdict"] == "PASS"
+    assert again["started"] == summary["started"] and again["invocations"] == 2   # the time of both runs counts
+    assert again["minutes"] >= summary["minutes"] and "over 2 runs" in (tmp_path / "report.md").read_text()
+
+    # scripts/accept.py on the run's ladder.json: specs and build radius come from the file, so the trained
+    # rungs are used as they are; another radius is refused rather than rebuilding every rung
+    import subprocess
+    import sys
+    from pathlib import Path
+
+    root = Path(__file__).resolve().parents[1]
+    files = sorted(p.name for p in (tmp_path / "rungs").iterdir())
+    out = tmp_path / "cli_acceptance.json"
+    cmd = [sys.executable, str(root / "scripts" / "accept.py"), "--puzzle", "toy", "--ladder-file",
+           str(tmp_path / "ladder.json"), "--out", str(out), "--n", "8", "--min-depth", "50", "--max-depth", "200",
+           "--time-limit", "20", "--extended-time-limit", "20"]
+    done = subprocess.run(cmd, cwd=root, capture_output=True, text=True, timeout=600)
+    assert done.returncode == 0, done.stdout + done.stderr
+    assert json.loads(out.read_text())["verdict"] == "PASS"
+    assert sorted(p.name for p in (tmp_path / "rungs").iterdir()) == files      # nothing rebuilt or set aside
+    wrong = subprocess.run(cmd + ["--radius", "5"], cwd=root, capture_output=True, text=True, timeout=600)
+    assert wrong.returncode == 2 and "radius 4" in wrong.stderr
 
 
 def test_one_command_with_an_automatic_ladder(tmp_path) -> None:
@@ -143,6 +164,34 @@ def test_the_best_network_is_kept(toy, tmp_path, monkeypatch) -> None:
     assert record["status"] == "done" and record["best"]["mean_cost"] == 40.0
     assert ladder.rungs[1].heuristic.update == seen[1]                 # the network of the second test
     assert record["final"]["update"] == seen[1]
+
+
+def test_the_best_network_is_kept_when_later_ones_fail_states(toy, tmp_path, monkeypatch) -> None:
+    """The Maltese ring rung of the designed ladder: its best network was also the last one to solve every test
+    state, and every later network failed some states until the time cap. The best one must still be kept."""
+    import core.autotrain as at
+
+    _, model, st = toy
+    ladder = Ladder(model, st, TOY_LEARNED, mitm_radius=4, log=_quiet).build(cache_dir=tmp_path)
+    seen: list[int] = []
+
+    def scripted(value, states, *a, **kw):
+        row = {"n": len(states), "mean_actions": 5.0, "seconds_per_state": 0.0, "mean_value": 0.0}
+        if "budget" not in kw:                                  # the final test on the other states
+            return {**row, "solved": 1.0, "tested": len(states), "complete": True, "mean_cost": 40.0,
+                    "update": value.update}
+        seen.append(value.update)
+        if len(seen) <= 2:                                      # every state solved: cost 50, then 40
+            return {**row, "solved": 1.0, "tested": len(states), "complete": True, "mean_cost": 60.0 - 10 * len(seen)}
+        return {**row, "solved": 0.9, "tested": 10, "complete": False, "mean_cost": 45.0}
+
+    monkeypatch.setattr(at, "evaluate", scripted)
+    cfg = replace(TINY, round_minutes=0.02, max_minutes=0.15)  # two full tests never plateau: the time cap ends it
+    ladder, record = at.autotrain_rung(ladder, 1, tmp_path, cfg, log=_quiet)
+    assert len(seen) > 2 and seen[-1] != seen[1]
+    assert record["status"] == "done" and record["best"]["update"] == seen[1]
+    assert ladder.rungs[1].heuristic.update == seen[1]
+    assert record["final"]["update"] == seen[1] and record["updates"] == seen[1]
 
 
 @pytest.mark.parametrize("bad", ["no_such_ladder"])

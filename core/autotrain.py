@@ -13,8 +13,9 @@ When to stop
     Every few minutes the network is tested on a fixed set of states as the solver hands them to the rung
     (deep scrambles with the earlier rungs solved, ``Ladder.sample_rung_states``), with the solver's first
     beam search, 15 s per state. Phase A: train until it solves every test state. Phase B: keep training while
-    the mean solution cost still drops by more than 1% over three tests; then keep the network of the best
-    test, which need not be the last. A time cap per rung bounds both. A test of a weak network stops once
+    the mean solution cost still drops by more than 1% over three tests. A time cap per rung bounds both.
+    At the end the network of the best test that solved every state is kept, which need not be the last
+    (later networks can score worse, or fail some states). A test of a weak network stops once
     a state has failed and half the round's training time has gone into testing (on the Maltese colour rung
     the first test of the whole set took 16 minutes against 5 of training), so testing never dominates;
     a network that solves every state is always tested on all of them.
@@ -368,10 +369,13 @@ def autotrain_rung(ladder: Ladder, index: int, cache_dir: str | Path, cfg: AutoT
         save()
 
     best = record.get("best")
-    last_full = next((t for t in reversed(record["tests"]) if _full(t, cfg.target)), None)
-    if best and best_file.exists() and last_full is not None and best["mean_cost"] < last_full["mean_cost"]:
+    if best and best_file.exists() and value.update != best["update"]:
+        # the network in hand is not the best one: a later test scored worse or failed some states
+        last = record["tests"][-1]
+        how = (f"scored {last['mean_cost']:.1f}" if _full(last, cfg.target)
+               else f"solved {100 * last['solved']:.1f}% of {last['tested']} test states")
         log(f"  keeping the network of update {best['update']} (mean cost {best['mean_cost']:.1f}); "
-            f"the last one scored {last_full['mean_cost']:.1f}")
+            f"the last test (update {last['update']}) {how}")
         value.load(best_file)
         value.fingerprint = fp
     value.save(net_file)
