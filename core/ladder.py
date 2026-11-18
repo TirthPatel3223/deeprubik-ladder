@@ -78,6 +78,7 @@ class RungSpec:
     check_candidates: int = 1500         # if any of those is missing, how many unused moves to consider adding
     max_bridges: int = 256               # ... and how many of them to keep when they leave the cheap moves' subgroup
     max_states: int = 60_000_000         # table mode: give up beyond this many cosets
+    pool_cap: int = 200_000              # candidates read: the shortest this many, plus the longest (the witnesses)
 
 
 def specs_to_json(specs: Sequence[RungSpec]) -> list[dict]:
@@ -171,7 +172,7 @@ class Ladder:
         for i, spec in enumerate(self.specs):
             feats = [feature_key(fs) for fs in spec.features]
             actions = digest("actions", pool, i, feats, spec.max_actions, spec.max_cost, spec.check_sample,
-                             spec.check_witnesses, spec.check_candidates, spec.max_bridges)
+                             spec.check_witnesses, spec.check_candidates, spec.max_bridges, spec.pool_cap)
             table = digest("table", actions, spec.max_states) if spec.mode == "table" else None
             # The next pool uses this rung's actions only through the Schreier words of its table.
             nxt = digest("pool", pool, i, feats, spec.mode, (actions, spec.schreier_cost) if spec.mode == "table" else None)
@@ -215,7 +216,13 @@ class Ladder:
         model = self.model
         ident_sig = _identity_signature(feats, model.n)
         by_sig: dict[bytes, Word] = {}
-        for w in sorted(pool, key=len):
+        pool = sorted(pool, key=len)
+        if len(pool) > spec.pool_cap:
+            # The cheapest moves and the bridges are among the shortest words; the witnesses (random Schreier
+            # generators) are the longest. Reading every word of a pool of millions takes many minutes.
+            tail = spec.check_witnesses + spec.check_sample
+            pool = pool[:spec.pool_cap] + pool[-tail:]
+        for w in pool:
             if spec.max_cost is not None and len(w) > spec.max_cost:
                 break
             for cand in (w, self.alg.invert(w)):
@@ -281,6 +288,7 @@ class Ladder:
         for a in range(len(actions)):
             inv_sig = _signature(feats, model.compile(self.alg.invert(actions.words[a])))
             actions.inverse[a] = sig_index[inv_sig]
+        actions.group_order = order
         self.log(f"  actions: {len(actions)} of {len(ordered)} distinct moves ({added} added for generation), "
                  f"costs {int(actions.costs.min())}..{int(actions.costs.max())}; "
                  f"group on the rung's pieces: 2^{np.log2(float(order)):.2f}")

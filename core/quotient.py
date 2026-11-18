@@ -30,6 +30,7 @@ class ActionSet:
     costs: np.ndarray            # (A,) cost of each action, in primitive moves
     tables: np.ndarray           # (A, n) gather tables on the points
     inverse: np.ndarray          # (A,) index of the inverse action, or -1 if it is not in the set
+    group_order: int | None = None   # order of the group the actions generate on the rung's points, when measured
 
     def __len__(self) -> int:
         return len(self.words)
