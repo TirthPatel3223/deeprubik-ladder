@@ -5,18 +5,24 @@
     puzzle = entry.build()
     specs = entry.ladders()["learned"]
 
-To add a puzzle, write its ``GatherPuzzle`` (by hand, like the Maltese Gear Cube, or compiled from a 3D
-model with ``core/geometry.py``, like the Tangram Cube) and its ladders, then add an entry here.
+A puzzle can also be given as a file, with no code (``--tables`` or ``--geometry``, see ``entry_from_args``):
+its ladder is then designed automatically by ``scripts/auto.py``.
+
+To add a puzzle permanently, write its ``GatherPuzzle`` (by hand, like the Maltese Gear Cube, or compiled
+from a 3D model with ``core/geometry.py``, like the Tangram Cube) and, optionally, hand-written ladders, then
+add an entry here.
 """
 from __future__ import annotations
 
+import argparse
+import re
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable
 
 from core.gather_engine import GatherPuzzle
 from core.harvest import WordAlgebra
-from core.notation import Notation, face_turns, steps, turns
+from core.notation import Notation, PlainNotation, face_turns, steps, turns
 
 LADDER_ROOT = Path("data/ladders")
 
@@ -118,3 +124,33 @@ def get_puzzle(name: str) -> PuzzleEntry:
         return PUZZLES[name]
     except KeyError:
         raise KeyError(f"unknown puzzle {name!r}; known puzzles: {', '.join(PUZZLES)}") from None
+
+
+def file_entry(puzzle: GatherPuzzle, title: str | None = None) -> PuzzleEntry:
+    """An entry for a puzzle read from a file: no hand-written ladders, notation by move name."""
+    name = re.sub(r"[^A-Za-z0-9_.-]+", "_", puzzle.name).strip("_.") or "puzzle"
+    return PuzzleEntry(name=name, title=title or puzzle.name, build=lambda: puzzle, ladders=lambda: {},
+                       notation=PlainNotation, default_ladder="auto")
+
+
+def add_puzzle_arguments(ap: argparse.ArgumentParser) -> None:
+    """``--puzzle NAME`` for a registered puzzle, or ``--tables FILE`` / ``--geometry FILE`` for any other."""
+    group = ap.add_mutually_exclusive_group()
+    group.add_argument("--puzzle", choices=sorted(PUZZLES), default=None, help="a registered puzzle (default: maltese)")
+    group.add_argument("--tables", default=None, help="a puzzle given as gather tables, .npz or .json (core/puzzle_io.py)")
+    group.add_argument("--geometry", default=None, help="a puzzle given as a 3D model, puzzle-geometry/1 JSON (core/geometry.py)")
+
+
+def entry_from_args(args: argparse.Namespace, default: str = "maltese",
+                    log: Callable[[str], None] = lambda msg: print(msg, flush=True)) -> PuzzleEntry:
+    """The puzzle chosen by ``add_puzzle_arguments``."""
+    from core.puzzle_io import load_geometry_puzzle, load_tables
+
+    if getattr(args, "tables", None):
+        puzzle, added = load_tables(args.tables)
+        if added:
+            log(f"{args.tables}: appended the inverse moves {', '.join(added)} (the move set must contain every inverse)")
+        return file_entry(puzzle)
+    if getattr(args, "geometry", None):
+        return file_entry(load_geometry_puzzle(args.geometry))
+    return get_puzzle(getattr(args, "puzzle", None) or default)

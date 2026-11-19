@@ -28,6 +28,7 @@ class CosetTable:
     dist: np.ndarray        # (N,) exact cost to the goal
     action: np.ndarray      # (N,) action that starts a cheapest path (-1 at the goal)
     complete: bool          # False if the build stopped at its state budget
+    fingerprint: str | None = None   # what built it (core/fingerprint.py); None for files from older builds
 
     def __len__(self) -> int:
         return len(self.keys)
@@ -42,12 +43,21 @@ class CosetTable:
     def save(self, path: str | Path) -> None:
         path = Path(path)
         path.parent.mkdir(parents=True, exist_ok=True)
-        np.savez(path, keys=self.keys, dist=self.dist, action=self.action, complete=np.array(self.complete))
+        extra = {} if self.fingerprint is None else {"fingerprint": np.array(self.fingerprint)}
+        np.savez(path, keys=self.keys, dist=self.dist, action=self.action, complete=np.array(self.complete), **extra)
 
     @staticmethod
     def load(path: str | Path) -> "CosetTable":
-        z = np.load(Path(path))
-        return CosetTable(keys=z["keys"], dist=z["dist"], action=z["action"], complete=bool(z["complete"]))
+        with np.load(Path(path)) as z:          # closed at once, so the file can be renamed on Windows
+            fp = str(z["fingerprint"]) if "fingerprint" in z.files else None
+            return CosetTable(keys=z["keys"], dist=z["dist"], action=z["action"], complete=bool(z["complete"]),
+                              fingerprint=fp)
+
+    @staticmethod
+    def read_fingerprint(path: str | Path) -> str | None:
+        """The fingerprint stored in a saved table, without loading the table itself."""
+        with np.load(Path(path)) as z:
+            return str(z["fingerprint"]) if "fingerprint" in z.files else None
 
 
 def build_table(q: Quotient, max_states: int = 50_000_000, chunk: int = 1 << 18,

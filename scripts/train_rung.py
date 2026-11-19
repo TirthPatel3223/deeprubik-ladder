@@ -36,17 +36,11 @@ def solver_states(ladder: Ladder, puzzle, model, structure, index: int, n: int,
     are the only link between large parts of the rung (see the warning in
     ``Ladder._select_actions``), walks stay in one part, and a network that solves every
     walk can still fail on almost every scramble."""
-    q = ladder.rungs[index].quotient
-    rng = np.random.default_rng(seed)
-    out = []
-    for _ in range(n):
-        state = puzzle.apply_word(puzzle.goal, rng.integers(0, model.num_moves, size=scramble_len).tolist())
-        try:
-            lab, _, _ = ladder.descend(structure.decode(state), upto=index)
-        except (LookupError, RuntimeError):
-            return None
-        out.append(q.project(lab))
-    return np.stack(out)
+    try:
+        return ladder.sample_rung_states(index, n, seed=seed, min_depth=scramble_len, max_depth=scramble_len,
+                                         time_limit=None, max_failures=0)
+    except (LookupError, RuntimeError):
+        return None
 
 
 def main() -> None:
@@ -99,12 +93,14 @@ def main() -> None:
     cfg = DaviConfig(res_dim=args.res_dim, num_blocks=args.blocks, batch_size=args.batch,
                      states_per_update=args.states, itrs_per_update=args.itrs, walk_max=args.walk,
                      lr=args.lr, loss_thresh=args.loss_thresh, force_sync=args.force_sync, max_updates=args.updates)
-    if ckpt.exists() and not args.fresh:
-        value = RungValue.from_checkpoint(q, ckpt)
+    if rung.heuristic is not None and not args.fresh:
+        # The ladder loads a checkpoint only if it was trained for this rung's current actions.
+        value = rung.heuristic
         value.cfg.max_updates = args.updates
         print(f"resuming from {ckpt} at update {value.update}", flush=True)
     else:
         value = RungValue(q, cfg)
+    value.fingerprint = rung.info["fingerprint"]["actions"]
     n_par = sum(p.numel() for p in value.net.parameters())
     print(f"network: {n_par / 1e6:.2f} M parameters on {value.device}", flush=True)
     t0 = time.time()

@@ -39,7 +39,7 @@ import torch
 
 from core.nnet import ResnetFC, evaluate
 from core.quotient import Quotient, TorchQuotient
-from core.search import beam_search, greedy_rollout
+from core.search import SearchSchedule, beam_search, greedy_rollout
 
 
 @dataclass
@@ -63,13 +63,18 @@ class DaviConfig:
     seed: int = 0
 
 
+def default_device() -> str:
+    """The GPU when there is one, otherwise the CPU (slow, but a trained ladder still loads and solves)."""
+    return "cuda" if torch.cuda.is_available() and torch.cuda.device_count() > 0 else "cpu"
+
+
 class RungValue:
     """A trained (or training) value network for one rung, with search on top."""
 
-    def __init__(self, quotient: Quotient, cfg: DaviConfig | None = None, device: str = "cuda") -> None:
+    def __init__(self, quotient: Quotient, cfg: DaviConfig | None = None, device: str | None = None) -> None:
         self.q = quotient
         self.cfg = cfg or DaviConfig()
-        self.tq = TorchQuotient(quotient, device)
+        self.tq = TorchQuotient(quotient, device or default_device())
         self.device = self.tq.device
         torch.manual_seed(self.cfg.seed)
         self.scale = float(quotient.costs.mean())
@@ -85,6 +90,7 @@ class RungValue:
         self.since_sync = 0
         self.history: list[dict] = []
         self.beam_widths = (256, 4096, 32768)
+        self.fingerprint: str | None = None   # the rung's actions it was trained for (core/fingerprint.py)
 
     # -- data generation -----------------------------------------------------------
     @torch.no_grad()
@@ -198,26 +204,31 @@ class RungValue:
             self.save(checkpoint)
 
     # -- solving -------------------------------------------------------------------------
-    def solve(self, vec, width: int | None = None, weight: float = 0.3, max_steps: int | None = None) -> list[int] | None:
+    def solve(self, vec, width: int | None = None, weight: float = 0.3, max_steps: int | None = None,
+              deadline: float | None = None, schedule: SearchSchedule | None = None) -> list[int] | None:
         """Actions taking the feature vector ``vec`` to the rung's goal, or None.
 
-        Beam search with the given width; if it finds nothing, the width is multiplied by 8
-        (twice at most). Without ``width`` the default schedule ``beam_widths`` is used.
-        ``weight`` scales the accumulated cost g in f = weight * g + h (default: 0.3).
+        Tries the beam searches of ``schedule`` in turn. By default: the given width, and if it finds
+        nothing the width multiplied by 8 (twice at most, never beyond 32,768); without ``width``, the
+        widths in ``beam_widths``. ``weight`` scales the accumulated cost g in f = weight * g + h.
+        Raises ``core.search.SearchTimeout`` if ``deadline`` (a ``time.time()`` value) passes first.
         """
         start = torch.as_tensor(vec, dtype=torch.uint8, device=self.device)
-        max_w = self.beam_widths[-1]  # 32,768 upper bound to fit comfortably in GPU memory
-        widths = self.beam_widths if width is None else tuple(dict.fromkeys(min(w, max_w) for w in (width, 8 * width, 64 * width)))
+        if schedule is None:
+            if width is None:
+                schedule = SearchSchedule(tuple((w, weight) for w in self.beam_widths))
+            else:
+                schedule = SearchSchedule.standard(width, weight, max_width=self.beam_widths[-1])
         steps = max(200, 6 * self.cfg.walk_max) if max_steps is None else max_steps
-        for w in widths:
-            found = beam_search(self.tq, self.value, start, width=w, max_steps=steps, weight=weight)
+        for w, wt in schedule.attempts:
+            found = beam_search(self.tq, self.value, start, width=w, max_steps=steps, weight=wt, deadline=deadline)
             if found is not None:
                 return found[0]
         return None
 
     # -- persistence ---------------------------------------------------------------------
     @staticmethod
-    def from_checkpoint(quotient: Quotient, path: str | Path, device: str = "cuda") -> "RungValue":
+    def from_checkpoint(quotient: Quotient, path: str | Path, device: str | None = None) -> "RungValue":
         """Rebuild a trained rung value from its checkpoint (network size comes from the file)."""
         data = torch.load(Path(path), map_location="cpu", weights_only=False)
         return RungValue(quotient, DaviConfig(**data["cfg"]), device).load(path)
@@ -228,7 +239,7 @@ class RungValue:
         torch.save({"net": self.net.state_dict(), "target": self.target.state_dict(), "opt": self.opt.state_dict(),
                     "cfg": asdict(self.cfg), "itr": self.itr, "update": self.update,
                     "target_updates": self.target_updates, "since_sync": self.since_sync,
-                    "target_is_zero": self.target_is_zero,
+                    "target_is_zero": self.target_is_zero, "fingerprint": self.fingerprint,
                     "history": self.history, "n_actions": self.q.n_actions, "n_slots": self.q.n_slots}, path)
 
     def load(self, path: str | Path) -> "RungValue":
@@ -241,4 +252,10 @@ class RungValue:
         self.target_updates, self.since_sync = data["target_updates"], data["since_sync"]
         self.target_is_zero = data.get("target_is_zero", False)
         self.history = data["history"]
+        self.fingerprint = data.get("fingerprint")
         return self
+
+    @staticmethod
+    def read_fingerprint(path: str | Path) -> str | None:
+        """The fingerprint stored in a checkpoint (None for checkpoints from older builds)."""
+        return torch.load(Path(path), map_location="cpu", weights_only=False).get("fingerprint")

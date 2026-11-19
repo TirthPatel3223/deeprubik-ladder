@@ -80,3 +80,23 @@ class Notation:
     def describe(self, word: Sequence[int]) -> str:
         """For example "476 quarter turns, 411 face turns"."""
         return ", ".join(f"{v} {k}" for k, v in self.lengths(word).items())
+
+
+class PlainNotation(Notation):
+    """For puzzles read from files: each move is written by its own name, one token per move, so any move
+    names work (several letters, digits, primes). A move made twice is written twice."""
+
+    def __init__(self, alg: WordAlgebra) -> None:
+        super().__init__(alg, prime_then_count=False, metrics=[("moves", steps), ("turns", turns)],
+                         legend="Each move is written by its own name; a move made several times is repeated.")
+
+    def format(self, word: Sequence[int]) -> str:
+        return " ".join(self.names[m] for m in self.alg.reduce(word))
+
+    def parse(self, text: str) -> list[int]:
+        out: list[int] = []
+        for token in text.replace(",", " ").split():
+            if token not in self.names:
+                raise ValueError(f"cannot read move {token!r}; moves are {' '.join(self.names)}")
+            out.append(self.names.index(token))
+        return out

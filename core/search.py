@@ -7,21 +7,31 @@ be the cheapest: the search keeps going while some beam state could still beat i
 
 Duplicates are detected with a 64-bit hash. A collision can only drop a state, never
 produce a wrong path, because the returned actions are replayed by the caller.
+
+A search can be given a deadline (``time.time()`` value). When a step would start after it, the search
+returns the best solution found so far, or raises ``SearchTimeout`` if it has none, so callers can tell
+"out of time" from "searched and found nothing" (None).
+``SearchSchedule`` is the list of (beam width, weight) attempts a rung tries in turn.
 """
 from __future__ import annotations
 
+import time
 from typing import Callable
 
 import torch
 
 from core.quotient import TorchQuotient
+from core.search_schedule import SearchSchedule, SearchTimeout  # noqa: F401  (re-exported)
 
 ValueFn = Callable[[torch.Tensor], torch.Tensor]      # (N, S) uint8 -> (N,) cost-to-go
 
+
 @torch.no_grad()
 def beam_search(tq: TorchQuotient, value_fn: ValueFn, start: torch.Tensor, width: int = 4096,
-                max_steps: int = 200, weight: float = 1.0, expand_chunk: int = 1 << 15) -> tuple[list[int], float] | None:
-    """Search from ``start`` (S,) to the rung's goal. Returns (actions, cost) or None."""
+                max_steps: int = 200, weight: float = 1.0, expand_chunk: int = 1 << 15,
+                deadline: float | None = None) -> tuple[list[int], float] | None:
+    """Search from ``start`` (S,) to the rung's goal. Returns (actions, cost) or None.
+    Raises ``SearchTimeout`` if ``deadline`` passes before any solution is found."""
     dev = tq.device
     start = start.to(dev).reshape(1, -1)
     if bool(tq.is_goal(start)[0]):
@@ -38,6 +48,10 @@ def beam_search(tq: TorchQuotient, value_fn: ValueFn, start: torch.Tensor, width
     best_path: tuple[int, int, int] | None = None     # (step, parent index, action)
 
     for step in range(max_steps):
+        if deadline is not None and time.time() > deadline:
+            if best_path is not None:
+                break                                 # out of time while looking for a cheaper path: keep this one
+            raise SearchTimeout
         b = beam.shape[0]
         child_states, child_g, child_parent, child_action = [], [], [], []
         for s in range(0, b, expand_chunk):

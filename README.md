@@ -25,6 +25,30 @@ pip install torch               # the CUDA build for your driver; Colab has it a
 pytest                          # about a minute; uses the GPU if there is one
 ```
 
+## One command
+
+Give the puzzle as data; every other decision is made by measurement:
+
+```bash
+python scripts/auto.py --tables my_puzzle.npz          # gather tables, see core/puzzle_io.py
+python scripts/auto.py --geometry my_puzzle.json       # or a 3D model, see core/geometry.py
+python scripts/auto.py --puzzle tangram_extreme        # or a registered puzzle
+python scripts/auto.py --puzzle maltese --ladder learned   # a registered hand-written ladder instead of a designed one
+```
+
+It analyses the move tables, designs the ladder, builds the macros and exact tables, trains each value
+network until it solves the states the solver hands it, and runs the acceptance test: 100 states scrambled
+with 2000 to 5000 random moves, 60 s each, and 300 s with a stronger search for at most 10 of them. Every
+stage resumes, and everything is written under `data/auto/`. How each decision is made, and what the runs
+measured, is in `docs/autonomy.md`. `python scripts/accept.py --puzzle maltese` runs the acceptance test alone.
+
+From the move tables alone it passes on all three puzzles here: the Tangram Cube Extreme at 97.5 steps per
+solve (68 minutes from start to verdict), the Maltese Gear Cube at 431.7 quarter turns (about 5 hours), and
+the original Tangram Cube, given as an `.npz` file, at 19.7 moves (12 seconds). The hand-made ladders are
+shorter, at 90.0, 406.1 and 18.0; `docs/autonomy.md` shows where the difference comes from. Given a
+hand-made ladder (`--ladder learned`), the networks it trains match the hand-trained ones: 405.6 quarter
+turns against 406.1 on the Maltese cube.
+
 ## Solving the Maltese Gear Cube
 
 ```bash
@@ -91,17 +115,25 @@ all-table ladder that needs no training (about 4 minutes; about 138 steps). Ever
 | `core/harvest.py`, `core/quotient.py`, `core/coset_table.py`, `core/ladder.py` | Macros, quotient puzzles, exact tables, the ladder |
 | `core/nnet.py`, `core/davi.py`, `core/search.py` | Value network, coset value iteration, beam search |
 | `core/geometry.py` | Compiles a 3D model (stickers as frames in space, moves as rotations of regions) into a `GatherPuzzle` |
+| `core/puzzle_io.py` | Puzzles read from files (gather tables), inverses computed and checked |
+| `core/auto.py`, `core/autotrain.py`, `core/acceptance.py` | The one-command driver, the training autopilot, the acceptance test |
+| `core/fingerprint.py` | Fingerprints that keep cache files from being reused for other inputs |
 | `core/notation.py` | Per-puzzle notation and length metrics |
 | `puzzles/registry.py` | Every puzzle the scripts know (`--puzzle`): tables, ladders, notation, cache paths |
 | `puzzles/maltese_gear/` | Verified move tables and the ladders for the Maltese Gear Cube |
 | `puzzles/tangram/` | The Tangram Cube Extreme and original: exported 3D geometry, and their ladders |
 | `puzzles/toy/` | A 29,160-state puzzle used to check everything against brute force |
-| `scripts/` | `build_ladder.py`, `train_rung.py`, `solve.py`, `analyse_puzzle.py`, `group_order.py`, `benchmark_deep_scrambles.py` |
+| `scripts/` | `auto.py` (everything), `accept.py`, `build_ladder.py`, `train_rung.py`, `solve.py`, `analyse_puzzle.py`, `group_order.py`, `benchmark_deep_scrambles.py` |
 | `tests/` | Unit and end-to-end tests |
 | `docs/` | The design note and the implementation notes |
 | `archive/` | The earlier attempts (single-network beam search), kept for reference |
 
 ## Adding a puzzle
+
+The quickest way needs no code: write the move tables to a file and run `scripts/auto.py --tables FILE`
+(or `--geometry FILE` for a 3D model). The format is in `core/puzzle_io.py`: `idx` (one gather table per
+move) and `goal` are required; `add`, `modulus`, `move_names` and `inverse` are optional, and inverse moves
+that are missing are added. To register a puzzle permanently, with its own notation or hand-written ladders:
 
 1. **The move tables**, one of two ways:
    - *From a 3D model* (preferred). Export the model's stickers (centre, normal, colour), pieces
