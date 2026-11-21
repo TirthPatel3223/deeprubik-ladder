@@ -60,6 +60,58 @@ class ResnetFC(nn.Module):
         return self.out(x).float() * self.scale
 
 
+class FusedResnet(nn.Module):
+    """Inference copy of a ``ResnetFC`` in eval mode: every batch norm folded into the layer before it, weights in
+    ``dtype``. It computes the same function as the network under bf16 autocast (the same rounding of the linear
+    layers), with fewer passes over the activations. It is frozen: rebuild it after the network changes."""
+
+    def __init__(self, net: ResnetFC, dtype: torch.dtype = torch.bfloat16) -> None:
+        super().__init__()
+
+        def affine(bn: nn.Module, dim: int, device) -> tuple[torch.Tensor, torch.Tensor]:
+            if isinstance(bn, nn.BatchNorm1d):
+                a = bn.weight / torch.sqrt(bn.running_var + bn.eps)
+                return a, bn.bias - a * bn.running_mean
+            return torch.ones(dim, device=device), torch.zeros(dim, device=device)
+
+        dim = net.bias.shape[0]
+        dev = net.bias.device
+        a0, b0 = affine(net.bn0, dim, dev)
+        self.register_buffer("table", (net.embed.weight * a0[None, :]).to(dtype))
+        self.register_buffer("bias", (net.bias * a0 + b0).to(dtype))
+        self.n_blocks = len(net.blocks)
+        for i, blk in enumerate(net.blocks):
+            a1, b1 = affine(blk.bn1, dim, dev)
+            a2, b2 = affine(blk.bn2, dim, dev)
+            for name, t in (("w1", blk.fc1.weight * a1[:, None]), ("c1", blk.fc1.bias * a1 + b1),
+                            ("w2", blk.fc2.weight * a2[:, None]), ("c2", blk.fc2.bias * a2 + b2)):
+                self.register_buffer(f"{name}_{i}", t.to(dtype))
+        self.register_buffer("w_out", net.out.weight.to(dtype))
+        self.register_buffer("b_out", net.out.bias.to(dtype))
+        self.register_buffer("offsets", net.offsets.clone(), persistent=False)
+        self.scale = net.scale
+
+    def forward(self, states: torch.Tensor) -> torch.Tensor:
+        x = nn.functional.embedding_bag(states.long() + self.offsets, self.table, mode="sum")
+        x = torch.relu(x + self.bias)
+        for i in range(self.n_blocks):
+            y = torch.relu(nn.functional.linear(x, getattr(self, f"w1_{i}"), getattr(self, f"c1_{i}")))
+            x = torch.relu(x + nn.functional.linear(y, getattr(self, f"w2_{i}"), getattr(self, f"c2_{i}")))
+        return nn.functional.linear(x, self.w_out, self.b_out).float() * self.scale
+
+
+@torch.no_grad()
+def fuse(net: nn.Module) -> nn.Module | None:
+    """A ``FusedResnet`` of ``net`` if it is a ``ResnetFC`` on a GPU, else None (use the network itself)."""
+    if not isinstance(net, ResnetFC) or not net.bias.is_cuda:
+        return None
+    was_training = net.training
+    net.eval()
+    fused = FusedResnet(net)
+    net.train(was_training)
+    return fused.eval()
+
+
 @torch.no_grad()
 def evaluate(net: nn.Module, states: torch.Tensor, chunk: int = 1 << 17, amp: bool = True) -> torch.Tensor:
     """Network output for many states, in chunks, in eval mode. Returns (N, out_dim) float32."""

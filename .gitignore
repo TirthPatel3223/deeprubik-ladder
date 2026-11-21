@@ -12,6 +12,7 @@ data/generated/
 data/ball/
 data/ladders/
 data/auto/
+data/whole/
 archive/checkpoints/
 archive/data/
 *.pt
